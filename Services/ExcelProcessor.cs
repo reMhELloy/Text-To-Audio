@@ -5,11 +5,14 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using JapaneseConverter;
+using Text_to_Image.Models;
 
 namespace Text_to_Image.Services
 {
     public class ExcelProcessor
     {
+        private static readonly string FolderPath = @"S:\Anki";
+
         public static void CleanWorksheet(string filePath)
         {
             try
@@ -230,6 +233,98 @@ namespace Text_to_Image.Services
                 return null;
             }
         }
+        public static bool SelectExcelFile(ProcessingOptions options)
+        {
+            string[] excelFiles = Directory.GetFiles(FolderPath, "*.xlsm");
+
+            Console.WriteLine("Available Excel files:");
+            for (int i = 0; i < excelFiles.Length; i++)
+            {
+                Console.WriteLine($"{i + 1}. {Path.GetFileName(excelFiles[i])}");
+            }
+
+            Console.Write("\nPlease enter the file number to process (press Enter to exit). ");
+            string fileInput = Console.ReadLine();
+
+            if (string.IsNullOrWhiteSpace(fileInput))
+                return false;
+
+            int fileChoice = int.Parse(fileInput) - 1;
+            if (fileChoice < 0 || fileChoice >= excelFiles.Length)
+            {
+                throw new ArgumentException("Invalid file number!");
+            }
+
+            options.SelectedFile = excelFiles[fileChoice];
+            options.FileName = Path.GetFileName(options.SelectedFile).ToLower();
+            return true;
+        }
+
+        public static bool OpenAndWaitForExcelFile(ProcessingOptions options)
+        {
+            // Xử lý dữ liệu sơ bộ - làm sạch worksheet
+            ExcelProcessor.CleanWorksheet(options.SelectedFile);
+
+            // Mở file Excel cho người dùng xem
+            Console.WriteLine("\nOpening cleaned Excel file...");
+            var excelProcess = ExcelProcessor.OpenExcelFile(options.SelectedFile);
+
+            if (excelProcess != null)
+            {
+                Console.WriteLine("File opened successfully...");
+                Console.WriteLine("Waiting for you to close Excel file...");
+
+                // Chờ cho đến khi người dùng đóng file Excel
+                excelProcess.WaitForExit();
+                Console.WriteLine("Detected Excel file has been closed.");
+                return true;
+            }
+
+            return false;
+        }
+
+        public static void ExecuteTasks(ProcessingOptions options)
+        {
+            // Audio file renaming
+            if (options.RenameAudioFiles)
+            {
+                AudioFileRenamer.RenameAudioFiles(options.AudioFolderPath, options.SelectedDay,
+                    options.SelectedMonth, options.SelectedYear, options.FileName);
+            }
+
+            // Excel processing
+            if (!string.IsNullOrWhiteSpace(options.ColumnInput) ||
+                !string.IsNullOrWhiteSpace(options.SoundColumns) ||
+                !string.IsNullOrWhiteSpace(options.KanjiColumn))
+            {
+                ExcelProcessor.ProcessExcelFile(options.SelectedFile, options.FileName,
+                    options.ColumnInput, options.SoundColumns, options.KanjiColumn, options.CustomDate);
+            }
+            else
+            {
+                Console.WriteLine("No tasks selected to perform...");
+            }
+        }
+
+        public static bool AskToContinue()
+        {
+            Console.Write("\nDo it again? (Y/N): ");
+            string answer = Console.ReadLine()?.Trim().ToUpper();
+
+            if (answer != "Y")
+            {
+                Console.WriteLine("The program has ended. Thank!");
+                return false;
+            }
+            else
+            {
+                Console.WriteLine("\n========================================");
+                Console.WriteLine("Starting new process...");
+                Console.WriteLine("========================================\n");
+                return true;
+            }
+        }
+
 
     }
 
