@@ -6,6 +6,7 @@ using System.Text;
 using System.Threading.Tasks;
 using JapaneseConverter;
 using Text_to_Image.Models;
+using static Microsoft.IO.RecyclableMemoryStreamManager;
 
 namespace Text_to_Image.Services
 {
@@ -80,7 +81,7 @@ namespace Text_to_Image.Services
                 throw; // Ném lại ngoại lệ để xử lý ở mức cao hơn
             }
         }
-        public static void ProcessExcelFile(string filePath, string fileName, string columnInput, string soundColumns, string kanjiColumn, string customDate = "")
+        public static void ProcessExcelFile(string filePath, string fileName, string columnInput, string soundColumns, string kanjiColumn, string kanjiOutputColumn, string customDate = "")
         {
             try
             {
@@ -172,15 +173,22 @@ namespace Text_to_Image.Services
                         }
 
                         // Xử lý định dạng Kanji nếu được yêu cầu
-                        if (!string.IsNullOrWhiteSpace(kanjiColumn) && kanjiColumn.Length == 1)
+                        if (!string.IsNullOrWhiteSpace(kanjiColumn) && kanjiColumn.Length >= 1)
                         {
-                            int kanjiCol = kanjiColumn[0] - 'A' + 1;
-                            string cellValue = worksheet.Cells[row, kanjiCol].Text;
+                            int sourceCol = kanjiColumn[0] - 'A' + 1;
 
+                            // Xác định cột đích - cần thêm tham số kanjiOutputColumn vào method
+                            int outputCol = sourceCol; // Mặc định lưu vào cột nguồn
+                            if (!string.IsNullOrWhiteSpace(kanjiOutputColumn) && kanjiOutputColumn.Length >= 1)
+                            {
+                                outputCol = kanjiOutputColumn[0] - 'A' + 1;
+                            }
+
+                            string cellValue = worksheet.Cells[row, sourceCol].Text;
                             if (!string.IsNullOrEmpty(cellValue))
                             {
                                 string formattedText = KanjiHelper.FormatKanjiWithBrackets(cellValue);
-                                worksheet.Cells[row, kanjiCol].Value = formattedText;
+                                worksheet.Cells[row, outputCol].Value = formattedText;
                             }
                         }
                     }
@@ -298,7 +306,7 @@ namespace Text_to_Image.Services
                 !string.IsNullOrWhiteSpace(options.KanjiColumn))
             {
                 ExcelProcessor.ProcessExcelFile(options.SelectedFile, options.FileName,
-                    options.ColumnInput, options.SoundColumns, options.KanjiColumn, options.CustomDate);
+                    options.ColumnInput, options.SoundColumns, options.KanjiColumn, options.KanjiOutputColumn, options.CustomDate);
             }
             else
             {

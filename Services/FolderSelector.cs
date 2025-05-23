@@ -12,11 +12,9 @@ namespace Text_to_Image.Services
         public static string SelectAudioFolder(string defaultPath = @"C:\Audio")
         {
             Console.WriteLine("\n========== AUDIO FOLDER SELECTION ==========");
-            Console.WriteLine("Note: This is for selecting the AUDIO files folder");
-            Console.WriteLine("(Excel files are stored separately in S:\\Anki)");
-            Console.WriteLine("\nChoose how you want to select the audio folder:");
+            Console.WriteLine("Choose how you want to select the audio folder:");
             Console.WriteLine("1. Use default audio folder");
-            Console.WriteLine("2. Open Windows Explorer (GUI) - Recommended");
+            Console.WriteLine("2. Open folder selection dialog");
             Console.WriteLine("3. Browse folders in console");
             Console.WriteLine("4. Enter custom folder path manually");
             Console.Write("Enter your choice (1-4): ");
@@ -29,7 +27,7 @@ namespace Text_to_Image.Services
                     return UseDefaultFolder(defaultPath);
 
                 case "2":
-                    return OpenWindowsExplorer(defaultPath);
+                    return OpenFolderSelectionDialog(defaultPath);
 
                 case "3":
                     return BrowseAndSelectFolder();
@@ -38,180 +36,126 @@ namespace Text_to_Image.Services
                     return EnterCustomPath();
 
                 default:
-                    Console.WriteLine("Invalid choice. Opening Windows Explorer.");
-                    return OpenWindowsExplorer(defaultPath);
+                    Console.WriteLine("Opening folder selection dialog.");
+                    return OpenFolderSelectionDialog(defaultPath);
             }
         }
 
-        private static string OpenWindowsExplorer(string defaultPath)
+        private static string OpenFolderSelectionDialog(string defaultPath)
         {
             try
             {
-                Console.WriteLine("\n--- WINDOWS EXPLORER FOLDER SELECTION ---");
-                Console.WriteLine("📁 How this works:");
-                Console.WriteLine("   1. Windows Explorer will open");
-                Console.WriteLine("   2. Navigate to your audio folder containing .mp3 files");
-                Console.WriteLine("   3. Click on the address bar and copy the full path");
-                Console.WriteLine("   4. Come back to this console window");
-                Console.WriteLine("   5. Paste the folder path when prompted");
+                Console.WriteLine("Opening folder selection dialog...");
 
-                Console.WriteLine("\n💡 Tips:");
-                Console.WriteLine("   - Look for files like: 19-2-2025-0001.mp3");
-                Console.WriteLine("   - You can also drag & drop the folder into this console");
+                // Create a PowerShell script to show folder browser dialog
+                string script = @"
+Add-Type -AssemblyName System.Windows.Forms
+$folderBrowser = New-Object System.Windows.Forms.FolderBrowserDialog
+$folderBrowser.Description = 'Select Audio Folder'
+$folderBrowser.ShowNewFolderButton = $true";
 
-                Console.WriteLine("\nPress Enter to open Windows Explorer...");
-                Console.ReadLine();
-
-                // Determine which folder to open
-                string explorerPath;
+                // Set initial directory if it exists
                 if (Directory.Exists(defaultPath))
                 {
-                    explorerPath = defaultPath;
-                    Console.WriteLine($"Opening Explorer at: {defaultPath}");
+                    script += $"\n$folderBrowser.SelectedPath = '{defaultPath}'";
                 }
                 else
                 {
-                    // Try common audio locations
-                    string[] commonAudioPaths = {
-                        Environment.GetFolderPath(Environment.SpecialFolder.MyMusic),
+                    // Try to find a reasonable starting location
+                    string[] tryPaths = {
                         @"C:\Audio",
                         @"D:\Audio",
-                        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads"),
-                        Environment.GetFolderPath(Environment.SpecialFolder.Desktop),
+                        Environment.GetFolderPath(Environment.SpecialFolder.MyMusic),
+                        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
                         @"C:\"
                     };
 
-                    explorerPath = @"C:\";
-                    foreach (string path in commonAudioPaths)
+                    foreach (string path in tryPaths)
                     {
                         if (Directory.Exists(path))
                         {
-                            explorerPath = path;
+                            script += $"\n$folderBrowser.SelectedPath = '{path}'";
                             break;
                         }
                     }
-                    Console.WriteLine($"Opening Explorer at: {explorerPath}");
                 }
 
-                // Open Windows Explorer
-                Process.Start("explorer.exe", $"\"{explorerPath}\"");
+                script += @"
+$result = $folderBrowser.ShowDialog()
+if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
+    Write-Output $folderBrowser.SelectedPath
+} else {
+    Write-Output 'CANCELLED'
+}";
 
-                // Wait a moment for Explorer to open
-                System.Threading.Thread.Sleep(1500);
+                ProcessStartInfo psi = new ProcessStartInfo()
+                {
+                    FileName = "powershell.exe",
+                    Arguments = $"-NoProfile -ExecutionPolicy Bypass -Command \"{script}\"",
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true
+                };
 
-                Console.WriteLine("\n🔍 Explorer is now open. Please navigate to your audio folder.");
-                Console.WriteLine("📋 Copy the folder path from the address bar (Ctrl+L then Ctrl+C)");
+                using (Process process = Process.Start(psi))
+                {
+                    string output = process.StandardOutput.ReadToEnd();
+                    string error = process.StandardError.ReadToEnd();
+                    process.WaitForExit();
 
-                return GetFolderPathFromUser();
+                    output = output?.Trim();
+
+                    if (!string.IsNullOrEmpty(error))
+                    {
+                        Console.WriteLine($"Error: {error}");
+                        return FallbackToManualInput();
+                    }
+
+                    if (output == "CANCELLED" || string.IsNullOrWhiteSpace(output))
+                    {
+                        Console.WriteLine("Folder selection was cancelled.");
+                        return null;
+                    }
+
+                    if (Directory.Exists(output))
+                    {
+                        Console.WriteLine($"Selected folder: {output}");
+                        return output;
+                    }
+                    else
+                    {
+                        Console.WriteLine("Selected path is not valid.");
+                        return FallbackToManualInput();
+                    }
+                }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"❌ Error opening Windows Explorer: {ex.Message}");
-                Console.WriteLine("Falling back to manual input method...");
-                return EnterCustomPath();
+                Console.WriteLine($"Error opening folder dialog: {ex.Message}");
+                return FallbackToManualInput();
             }
         }
 
-        private static string GetFolderPathFromUser()
+        private static string FallbackToManualInput()
         {
-            int attempts = 0;
-            const int maxAttempts = 3;
-
-            while (attempts < maxAttempts)
-            {
-                Console.Write("\n📁 Paste your audio folder path here: ");
-                string userPath = Console.ReadLine()?.Trim();
-
-                if (string.IsNullOrWhiteSpace(userPath))
-                {
-                    Console.WriteLine("❌ No path entered.");
-                    attempts++;
-                    continue;
-                }
-
-                // Clean up the path (remove quotes, trim whitespace)
-                userPath = userPath.Trim('"').Trim('\'').Trim();
-
-                // Handle drag & drop paths that might have extra characters
-                if (userPath.StartsWith("&"))
-                {
-                    userPath = userPath.Substring(1).Trim();
-                }
-
-                if (Directory.Exists(userPath))
-                {
-                    // Check if folder contains any .mp3 files
-                    string[] mp3Files = Directory.GetFiles(userPath, "*.mp3");
-
-                    Console.WriteLine($"✅ Valid folder selected: {userPath}");
-                    Console.WriteLine($"📊 Found {mp3Files.Length} .mp3 files in this folder");
-
-                    if (mp3Files.Length == 0)
-                    {
-                        Console.WriteLine("⚠️  Warning: No .mp3 files found in this folder.");
-                        Console.Write("Continue anyway? (Y/N): ");
-                        string continueChoice = Console.ReadLine()?.Trim().ToUpper();
-
-                        if (continueChoice != "Y")
-                        {
-                            attempts++;
-                            Console.WriteLine("Please select a different folder.");
-                            continue;
-                        }
-                    }
-
-                    return userPath;
-                }
-                else
-                {
-                    Console.WriteLine($"❌ Invalid folder path: {userPath}");
-                    Console.WriteLine("Please check the path and try again.");
-                    attempts++;
-
-                    if (attempts < maxAttempts)
-                    {
-                        Console.WriteLine($"💡 Tips for copying path:");
-                        Console.WriteLine("   - Click on folder address bar (or press Ctrl+L)");
-                        Console.WriteLine("   - The full path will be highlighted");
-                        Console.WriteLine("   - Press Ctrl+C to copy, then Ctrl+V to paste here");
-                    }
-                }
-            }
-
-            Console.WriteLine($"\n❌ Maximum attempts ({maxAttempts}) reached.");
-            Console.Write("Do you want to try a different method? (Y/N): ");
-            string retry = Console.ReadLine()?.Trim().ToUpper();
-
-            if (retry == "Y")
-            {
-                return SelectAudioFolder();
-            }
-            else
-            {
-                Console.WriteLine("Skipping audio folder selection.");
-                return null;
-            }
+            Console.WriteLine("Falling back to manual input.");
+            return EnterCustomPath();
         }
 
         private static string UseDefaultFolder(string defaultPath)
         {
-            // Thay đổi default path cho audio folder
-            string audioDefaultPath = @"C:\Audio"; // hoặc bất kỳ path nào phù hợp
-
-            Console.WriteLine("Note: Default audio folder is separate from Excel folder.");
-            Console.WriteLine($"Excel files are in: S:\\Anki");
-            Console.WriteLine($"Default audio folder: {audioDefaultPath}");
+            string audioDefaultPath = @"C:\Audio";
 
             if (Directory.Exists(audioDefaultPath))
             {
-                Console.WriteLine($"✅ Using default audio folder: {audioDefaultPath}");
+                Console.WriteLine($"Using default audio folder: {audioDefaultPath}");
                 return audioDefaultPath;
             }
             else
             {
-                Console.WriteLine($"❌ Default audio folder doesn't exist: {audioDefaultPath}");
-                Console.WriteLine("Please select another option.");
-                return OpenWindowsExplorer(defaultPath);
+                Console.WriteLine($"Default audio folder doesn't exist: {audioDefaultPath}");
+                return OpenFolderSelectionDialog(defaultPath);
             }
         }
 
@@ -219,7 +163,6 @@ namespace Text_to_Image.Services
         {
             try
             {
-                // Hiển thị các drives có sẵn
                 DriveInfo[] drives = DriveInfo.GetDrives()
                     .Where(d => d.IsReady && d.DriveType == DriveType.Fixed)
                     .ToArray();
@@ -260,9 +203,8 @@ namespace Text_to_Image.Services
                 {
                     Console.WriteLine($"\nCurrent path: {currentPath}");
 
-                    // Lấy danh sách thư mục
                     string[] directories = Directory.GetDirectories(currentPath)
-                        .Take(20) // Giới hạn 20 thư mục để không quá dài
+                        .Take(20)
                         .ToArray();
 
                     if (directories.Length == 0)
@@ -337,7 +279,6 @@ namespace Text_to_Image.Services
                     continue;
                 }
 
-                // Xử lý path với quotes
                 customPath = customPath.Trim('"');
 
                 if (Directory.Exists(customPath))
@@ -353,7 +294,6 @@ namespace Text_to_Image.Services
 
                     if (retry != "Y")
                     {
-                        // Trả về null nếu user không muốn thử lại
                         Console.WriteLine("Skipping audio folder selection.");
                         return null;
                     }

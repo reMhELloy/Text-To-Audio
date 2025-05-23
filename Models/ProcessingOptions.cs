@@ -17,6 +17,7 @@ namespace Text_to_Image.Models
         public string ColumnInput { get; set; }
         public string SoundColumns { get; set; }
         public string KanjiColumn { get; set; }
+        public string KanjiOutputColumn { get; set; }
         public bool RenameAudioFiles { get; set; }
         public string AudioFolderPath { get; set; }
 

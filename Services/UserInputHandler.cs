@@ -38,13 +38,39 @@ namespace Text_to_Image.Services
             // Câu hỏi 4: Chọn cột Kanji
             if (options.FileName.Contains("tuvung"))
             {
-                Console.Write("\nConvert to Kanji (Vocab). Default: F for Vocab. (Enter to skip). ");
+                Console.Write("\nSelect source Kanji column (Vocab). Default: F for Vocab. (Enter to skip). ");
                 options.KanjiColumn = Console.ReadLine()?.ToUpper();
+                if (string.IsNullOrWhiteSpace(options.KanjiColumn))
+                    options.KanjiColumn = "F"; // Default for Vocab
+                Console.Write("Select column to save processed Kanji results (example: A, B, D, E...): ");
+                string kanjiOutput;
+                do
+                {
+                    kanjiOutput = Console.ReadLine()?.ToUpper();
+                    if (string.IsNullOrWhiteSpace(kanjiOutput))
+                    {
+                        Console.Write("Please enter target column (cannot be empty): ");
+                    }
+                } while (string.IsNullOrWhiteSpace(kanjiOutput));
+                options.KanjiOutputColumn = kanjiOutput;
             }
             else
             {
-                Console.Write("\nConvert to Kanji (JP-ZH). Default: B for JP-ZH. (Enter to skip). ");
+                Console.Write("\nSelect source Kanji column (JP-ZH). Default: C for JP-ZH. (Enter to skip). ");
                 options.KanjiColumn = Console.ReadLine()?.ToUpper();
+                if (string.IsNullOrWhiteSpace(options.KanjiColumn))
+                    options.KanjiColumn = "C"; // Default for JP-ZH
+                Console.Write("Select column to save processed Kanji results (example: A, B, D, E...): ");
+                string kanjiOutput;
+                do
+                {
+                    kanjiOutput = Console.ReadLine()?.ToUpper();
+                    if (string.IsNullOrWhiteSpace(kanjiOutput))
+                    {
+                        Console.Write("Please enter target column (cannot be empty): ");
+                    }
+                } while (string.IsNullOrWhiteSpace(kanjiOutput));
+                options.KanjiOutputColumn = kanjiOutput;
             }
 
             // Câu hỏi 5: Đổi tên file âm thanh
