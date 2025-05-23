@@ -81,18 +81,18 @@ namespace Text_to_Image.Services
                 throw; // Ném lại ngoại lệ để xử lý ở mức cao hơn
             }
         }
-        public static void ProcessExcelFile(string filePath, string fileName, string columnInput, string soundColumns, string kanjiColumn, string kanjiOutputColumn, string customDate = "")
+        public static void ProcessExcelFile(ProcessingOptions options)
         {
             try
             {
                 Console.WriteLine("Đang xử lý dữ liệu trong file Excel...");
 
                 ExcelPackage.LicenseContext = LicenseContext.NonCommercial;
-                using (var package = new ExcelPackage(new FileInfo(filePath)))
+                using (var package = new ExcelPackage(new FileInfo(options.SelectedFile)))
                 {
                     var worksheet = package.Workbook.Worksheets[0];
                     int rowCount = worksheet.Dimension != null ? worksheet.Dimension.End.Row : 0;
-                    string dateToUse = string.IsNullOrWhiteSpace(customDate) ? DateTime.Now.ToString("dd-MM-yyyy") : customDate;
+                    string dateToUse = string.IsNullOrWhiteSpace(options.CustomDate) ? DateTime.Now.ToString("dd-MM-yyyy") : options.CustomDate;
                     Console.WriteLine($"Sử dụng ngày: {dateToUse}");
 
 
@@ -109,10 +109,10 @@ namespace Text_to_Image.Services
                     for (int row = 1; row <= rowCount; row++)
                     {
                         // Xử lý chuyển đổi text nếu được yêu cầu
-                        if (!string.IsNullOrWhiteSpace(columnInput) && columnInput.Length == 2)
+                        if (!string.IsNullOrWhiteSpace(options.ColumnInput) && options.ColumnInput.Length == 2)
                         {
-                            int inputColumn = columnInput[0] - 'A' + 1;
-                            int outputColumn = columnInput[1] - 'A' + 1;
+                            int inputColumn = options.ColumnInput[0] - 'A' + 1;
+                            int outputColumn = options.ColumnInput[1] - 'A' + 1;
 
                             string inputText = worksheet.Cells[row, inputColumn].Text;
                             if (!string.IsNullOrEmpty(inputText))
@@ -123,12 +123,12 @@ namespace Text_to_Image.Services
                         }
 
                         // Xử lý công thức âm thanh nếu được yêu cầu
-                        if (!string.IsNullOrWhiteSpace(soundColumns))
+                        if (!string.IsNullOrWhiteSpace(options.SoundColumns))
                         {
-                            if (fileName.Contains("tuvung") && soundColumns.Length == 2)
+                            if (options.FileName.Contains("tuvung") && options.SoundColumns.Length == 2)
                             {
-                                int soundCol1 = soundColumns[0] - 'A' + 1;
-                                int soundCol2 = soundColumns[1] - 'A' + 1;
+                                int soundCol1 = options.SoundColumns[0] - 'A' + 1;
+                                int soundCol2 = options.SoundColumns[1] - 'A' + 1;
 
                                 worksheet.Cells[row, soundCol1].Value =
                                     $"[sound:Vocab-{dateToUse}_{row:00}.mp3]";
@@ -136,12 +136,12 @@ namespace Text_to_Image.Services
                                 worksheet.Cells[row, soundCol2].Value =
                                     $"[sound:Vocab-{dateToUse}_{(row + rowCount):00}.mp3]";
                             }
-                            else if (soundColumns.Length == 1)
+                            else if (options.SoundColumns.Length == 1)
                             {
-                                int soundCol = soundColumns[0] - 'A' + 1;
-                                string prefix = fileName.Contains("english") ? "EN" :
-                                              fileName.Contains("japanese") ? "JP" :
-                                              fileName.Contains("chinese") ? "ZH" : "";
+                                int soundCol = options.SoundColumns[0] - 'A' + 1;
+                                string prefix = options.FileName.Contains("english") ? "EN" :
+                                              options.FileName.Contains("japanese") ? "JP" :
+                                              options.FileName.Contains("chinese") ? "ZH" : "";
 
                                 if (!string.IsNullOrEmpty(prefix))
                                 {
@@ -149,14 +149,14 @@ namespace Text_to_Image.Services
                                         $"[sound:{prefix}-{dateToUse}_{row:00}.mp3]";
                                 }
                             }
-                            else if (soundColumns.Length == 2)
+                            else if (options.SoundColumns.Length == 2)
                             {
                                 // Xử lý 2 cột - áp dụng logic lẻ/chẵn cho EN/JP/ZH
-                                int soundCol1 = soundColumns[0] - 'A' + 1; // Cột cho file số lẻ
-                                int soundCol2 = soundColumns[1] - 'A' + 1; // Cột cho file số chẵn
-                                string prefix = fileName.Contains("english") ? "EN" :
-                                              fileName.Contains("japanese") ? "JP" :
-                                              fileName.Contains("chinese") ? "ZH" : "";
+                                int soundCol1 = options.SoundColumns[0] - 'A' + 1; // Cột cho file số lẻ
+                                int soundCol2 = options.SoundColumns[1] - 'A' + 1; // Cột cho file số chẵn
+                                string prefix = options.FileName.Contains("english") ? "EN" :
+                                              options.FileName.Contains("japanese") ? "JP" :
+                                              options.FileName.Contains("chinese") ? "ZH" : "";
 
                                 if (!string.IsNullOrEmpty(prefix))
                                 {
@@ -173,15 +173,21 @@ namespace Text_to_Image.Services
                         }
 
                         // Xử lý định dạng Kanji nếu được yêu cầu
-                        if (!string.IsNullOrWhiteSpace(kanjiColumn) && kanjiColumn.Length >= 1)
+                        if (!string.IsNullOrWhiteSpace(options.KanjiColumn) &&
+                            options.KanjiColumn.Length >= 1 &&
+                            (options.FileName.Contains("tuvung") ||
+                             options.FileName.Contains("japanese") ||
+                             options.FileName.Contains("JP") ||
+                             options.FileName.Contains("chinese") ||
+                             options.FileName.Contains("ZH")))
                         {
-                            int sourceCol = kanjiColumn[0] - 'A' + 1;
+                            int sourceCol = options.KanjiColumn[0] - 'A' + 1;
 
                             // Xác định cột đích - cần thêm tham số kanjiOutputColumn vào method
                             int outputCol = sourceCol; // Mặc định lưu vào cột nguồn
-                            if (!string.IsNullOrWhiteSpace(kanjiOutputColumn) && kanjiOutputColumn.Length >= 1)
+                            if (!string.IsNullOrWhiteSpace(options.KanjiOutputColumn) && options.KanjiOutputColumn.Length >= 1)
                             {
-                                outputCol = kanjiOutputColumn[0] - 'A' + 1;
+                                outputCol = options.KanjiOutputColumn[0] - 'A' + 1;
                             }
 
                             string cellValue = worksheet.Cells[row, sourceCol].Text;
@@ -199,19 +205,19 @@ namespace Text_to_Image.Services
                         Console.WriteLine($"\nHoàn tất! Đã xử lý {rowCount} dòng.");
 
                         // Hiển thị thông tin về các tác vụ đã thực hiện
-                        if (!string.IsNullOrWhiteSpace(columnInput))
-                            Console.WriteLine($"- <img>: done | {columnInput[0]} -> {columnInput[1]}");
-                        if (!string.IsNullOrWhiteSpace(soundColumns))
-                            Console.WriteLine($"- [sound]: done | {soundColumns}");
-                        if (!string.IsNullOrWhiteSpace(kanjiColumn))
-                            Console.WriteLine($"- kanji: done | {kanjiColumn}");
+                        if (!string.IsNullOrWhiteSpace(options.ColumnInput))
+                            Console.WriteLine($"- <img>: done | {options.ColumnInput[0]} -> {options.ColumnInput[1]}");
+                        if (!string.IsNullOrWhiteSpace(options.SoundColumns))
+                            Console.WriteLine($"- [sound]: done | {options.SoundColumns}");
+                        if (!string.IsNullOrWhiteSpace(options.KanjiColumn))
+                            Console.WriteLine($"- kanji: done | {options.KanjiColumn}");
 
                         // Hỏi người dùng có muốn mở file đã xử lý không
                         Console.Write("\nOpen Processed Excel File? (Y/N): ");
                         string openAnswer = Console.ReadLine().Trim().ToUpper();
                         if (openAnswer == "Y")
                         {
-                            OpenExcelFile(filePath);
+                            OpenExcelFile(options.SelectedFile);
                         }
                     }
                     catch (IOException ex)
@@ -305,8 +311,7 @@ namespace Text_to_Image.Services
                 !string.IsNullOrWhiteSpace(options.SoundColumns) ||
                 !string.IsNullOrWhiteSpace(options.KanjiColumn))
             {
-                ExcelProcessor.ProcessExcelFile(options.SelectedFile, options.FileName,
-                    options.ColumnInput, options.SoundColumns, options.KanjiColumn, options.KanjiOutputColumn, options.CustomDate);
+                ExcelProcessor.ProcessExcelFile(options);
             }
             else
             {
