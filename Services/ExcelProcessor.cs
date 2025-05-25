@@ -162,11 +162,11 @@ namespace Text_to_Image.Services
                                 {
                                     // Công thức cho file âm thanh số lẻ (1, 3, 5, 7, ...)
                                     worksheet.Cells[row, soundCol1].Value =
-                                        $"[sound:{prefix}-{dateToUse}_{(row * 2 - 1):0000}.mp3]";
+                                        $"[sound:{prefix}-{dateToUse}_{(row * 2 - 1):00}.mp3]";
 
                                     // Công thức cho file âm thanh số chẵn (2, 4, 6, 8, ...)
                                     worksheet.Cells[row, soundCol2].Value =
-                                        $"[sound:{prefix}-{dateToUse}_{(row * 2):0000}.mp3]";
+                                        $"[sound:{prefix}-{dateToUse}_{(row * 2):00}.mp3]";
                                 }
                             }
 
