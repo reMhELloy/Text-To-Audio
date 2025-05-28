@@ -10,7 +10,8 @@ namespace Text_to_Image.Services
 {
     public static class UserInputHandler
     {
-        public static void GetProcessingInputs(ProcessingOptions options)
+        // Method 1: CHỈ hỏi Excel processing inputs
+        public static void GetExcelProcessingInputs(ProcessingOptions options)
         {
             // Kiểm tra loại file dựa trên tên file thực tế
             string fileName = options.FileName.ToLower();
@@ -19,39 +20,7 @@ namespace Text_to_Image.Services
             bool isJapaneseFile = fileName.Contains("japanese");
             bool isChineseFile = fileName.Contains("chinese");
 
-            // Câu hỏi 1: Tạo file âm thanh (ĐẨY LÊN TRƯỚC)
-            Console.Write("\nDo you want to create audio files using Azure Speech? (Y/N): ");
-            string createAudioAnswer = Console.ReadLine()?.Trim().ToUpper();
-            options.CreateAudioFiles = (createAudioAnswer == "Y");
-
-            if (options.CreateAudioFiles)
-            {
-                // Tự động xác định loại file và cột mặc định cho audio
-                SetDefaultAudioConfiguration(options);
-
-                // Chỉ cần chọn thư mục lưu audio (mặc định mở dialog)
-                options.AudioOutputFolder = AudioFolderManager.SelectAudioOutputFolder(options);
-
-                if (string.IsNullOrEmpty(options.AudioOutputFolder))
-                {
-                    Console.WriteLine("No audio output folder selected. Skipping audio creation.");
-                    options.CreateAudioFiles = false;
-                }
-            }
-
-            // Câu hỏi 2: Đổi tên file âm thanh (ĐẨY LÊN THỨ 2)
-            Console.Write("\nDo you want to rename audio files? (Y/N): ");
-            string renameAnswer = Console.ReadLine()?.Trim().ToUpper();
-            options.RenameAudioFiles = (renameAnswer == "Y");
-
-            // Nếu chọn đổi tên file âm thanh, cho phép chọn folder
-            if (options.RenameAudioFiles)
-            {
-                options.AudioFolderPath = AudioFolderManager.SelectAudioFolder();
-                AudioFolderManager.DisplayFolderInfo(options.AudioFolderPath);
-            }
-
-            // Câu hỏi 3: Chọn cột chuyển đổi text (bỏ qua nếu là English)
+            // Câu hỏi 1: Chọn cột chuyển đổi text (bỏ qua nếu là English)
             if (!isEnglishFile)
             {
                 if (isTuVungFile)
@@ -76,7 +45,7 @@ namespace Text_to_Image.Services
                 }
             }
 
-            // Câu hỏi 4: Chọn cột âm thanh (hiển thị cho tất cả các file)
+            // Câu hỏi 2: Chọn cột âm thanh (hiển thị cho tất cả các file)
             if (isTuVungFile)
             {
                 Console.Write("\nConvert to [sound] (TuVung). Default: DH. (Enter to skip). ");
@@ -103,7 +72,7 @@ namespace Text_to_Image.Services
                 options.SoundColumns = Console.ReadLine()?.ToUpper();
             }
 
-            // Câu hỏi 5: Chọn cột Kanji (bỏ qua nếu là English)
+            // Câu hỏi 3: Chọn cột Kanji (bỏ qua nếu là English)
             if (!isEnglishFile)
             {
                 if (isTuVungFile)
@@ -154,6 +123,44 @@ namespace Text_to_Image.Services
                     if (string.IsNullOrWhiteSpace(options.KanjiOutputColumn))
                         options.KanjiOutputColumn = "B"; // Default for JP-ZH
                 }
+            }
+        }
+
+        // Method 2: CHỈ hỏi Audio Creation inputs - SAU KHI Excel hoàn thành
+        public static void GetAudioCreationInputs(ProcessingOptions options)
+        {
+            Console.Write("\nDo you want to create audio files using Azure Speech? (Y/N): ");
+            string createAudioAnswer = Console.ReadLine()?.Trim().ToUpper();
+            options.CreateAudioFiles = (createAudioAnswer == "Y");
+
+            if (options.CreateAudioFiles)
+            {
+                // Tự động xác định loại file và cột mặc định cho audio
+                SetDefaultAudioConfiguration(options);
+
+                // Chỉ cần chọn thư mục lưu audio (mặc định mở dialog)
+                options.AudioOutputFolder = AudioFolderManager.SelectAudioOutputFolder(options);
+
+                if (string.IsNullOrEmpty(options.AudioOutputFolder))
+                {
+                    Console.WriteLine("No audio output folder selected. Skipping audio creation.");
+                    options.CreateAudioFiles = false;
+                }
+            }
+        }
+
+        // Method 3: CHỈ hỏi Audio Rename inputs - SAU KHI Audio Creation hoàn thành
+        public static void GetAudioRenameInputs(ProcessingOptions options)
+        {
+            Console.Write("\nDo you want to rename audio files? (Y/N): ");
+            string renameAnswer = Console.ReadLine()?.Trim().ToUpper();
+            options.RenameAudioFiles = (renameAnswer == "Y");
+
+            // Nếu chọn đổi tên file âm thanh, cho phép chọn folder
+            if (options.RenameAudioFiles)
+            {
+                options.AudioFolderPath = AudioFolderManager.SelectAudioFolder();
+                AudioFolderManager.DisplayFolderInfo(options.AudioFolderPath);
             }
         }
 

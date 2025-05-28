@@ -43,30 +43,36 @@ public class Program
                     continue;
                 }
 
-                // Step 4: Get User Inputs (ALL inputs including audio)
-                UserInputHandler.GetProcessingInputs(options);
+                // Step 4: Get Excel Processing Inputs ONLY
+                UserInputHandler.GetExcelProcessingInputs(options);
 
-                // Step 5: Execute Excel Tasks FIRST - Đợi hoàn thành
+                // Step 5: Execute Excel Tasks - Đợi hoàn thành hoàn toàn
                 Console.WriteLine("Processing Excel tasks...");
                 ExcelProcessor.ExecuteTasks(options);
                 Console.WriteLine("Excel processing completed.\n");
 
-                // Step 6: Execute Audio Tasks (if selected) - Đợi hoàn thành
+                // Step 6: Ask Audio Creation Question - SAU KHI Excel hoàn thành
+                UserInputHandler.GetAudioCreationInputs(options);
+
+                // Step 7: Execute Audio Creation - Đợi hoàn thành hoàn toàn  
                 if (options.CreateAudioFiles)
                 {
-                    Console.WriteLine("Step 1: Creating audio files...");
+                    Console.WriteLine("Creating audio files...");
                     await ExecuteAudioTasks(options);
-                    Console.WriteLine("Step 1: Audio creation completed.\n");
+                    Console.WriteLine("Audio creation completed.\n");
                 }
 
-                // Step 7: Execute Audio Rename (if selected) - Đợi hoàn thành
+                // Step 8: Ask Audio Rename Question - SAU KHI Audio Creation hoàn thành
+                UserInputHandler.GetAudioRenameInputs(options);
+
+                // Step 9: Execute Audio Rename - Đợi hoàn thành hoàn toàn
                 if (options.RenameAudioFiles)
                 {
-                    Console.WriteLine("Step 2: Renaming audio files...");
+                    Console.WriteLine("Renaming audio files...");
                     AudioFileManager.RenameAudioFiles(options.AudioFolderPath,
                         options.SelectedDay.ToString(), options.SelectedMonth.ToString(),
                         options.SelectedYear.ToString(), options.FileName);
-                    Console.WriteLine("Step 2: Audio renaming completed.\n");
+                    Console.WriteLine("Audio renaming completed.\n");
                 }
 
                 // Step 7: Continue?
