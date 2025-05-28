@@ -302,7 +302,7 @@ namespace Text_to_Image.Services
             // Audio file renaming
             if (options.RenameAudioFiles)
             {
-                AudioFileRenamer.RenameAudioFiles(options.AudioFolderPath, options.SelectedDay,
+                AudioFileManager.RenameAudioFiles(options.AudioFolderPath, options.SelectedDay,
                     options.SelectedMonth, options.SelectedYear, options.FileName);
             }
 

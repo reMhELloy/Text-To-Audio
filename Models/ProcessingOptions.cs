@@ -21,6 +21,19 @@ namespace Text_to_Image.Models
         public bool RenameAudioFiles { get; set; }
         public string AudioFolderPath { get; set; }
 
+        public string AudioOutputFolder { get; set; }
+        public bool CreateAudioFiles { get; set; } = false;
+
+        // Audio source columns
+        public string VietnameseColumn { get; set; }
+        public string EnglishColumn { get; set; }
+        public string JapaneseColumn { get; set; }
+        public string ChineseColumn { get; set; }
+
+        // Audio file type để xác định logic xử lý
+        public string AudioFileType { get; set; }
+
+
         public ProcessingOptions()
         {
             SelectedYear = DateTime.Now.Year.ToString();

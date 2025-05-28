@@ -4,6 +4,7 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using Text_to_Image.Models;
+using Text_to_Image.Services;
 
 namespace Text_to_Image.Services
 {
@@ -18,7 +19,39 @@ namespace Text_to_Image.Services
             bool isJapaneseFile = fileName.Contains("japanese");
             bool isChineseFile = fileName.Contains("chinese");
 
-            // Câu hỏi 2: Chọn cột chuyển đổi text (bỏ qua nếu là English)
+            // Câu hỏi 1: Tạo file âm thanh (ĐẨY LÊN TRƯỚC)
+            Console.Write("\nDo you want to create audio files using Azure Speech? (Y/N): ");
+            string createAudioAnswer = Console.ReadLine()?.Trim().ToUpper();
+            options.CreateAudioFiles = (createAudioAnswer == "Y");
+
+            if (options.CreateAudioFiles)
+            {
+                // Tự động xác định loại file và cột mặc định cho audio
+                SetDefaultAudioConfiguration(options);
+
+                // Chỉ cần chọn thư mục lưu audio (mặc định mở dialog)
+                options.AudioOutputFolder = AudioFolderManager.SelectAudioOutputFolder(options);
+
+                if (string.IsNullOrEmpty(options.AudioOutputFolder))
+                {
+                    Console.WriteLine("No audio output folder selected. Skipping audio creation.");
+                    options.CreateAudioFiles = false;
+                }
+            }
+
+            // Câu hỏi 2: Đổi tên file âm thanh (ĐẨY LÊN THỨ 2)
+            Console.Write("\nDo you want to rename audio files? (Y/N): ");
+            string renameAnswer = Console.ReadLine()?.Trim().ToUpper();
+            options.RenameAudioFiles = (renameAnswer == "Y");
+
+            // Nếu chọn đổi tên file âm thanh, cho phép chọn folder
+            if (options.RenameAudioFiles)
+            {
+                options.AudioFolderPath = AudioFolderManager.SelectAudioFolder();
+                AudioFolderManager.DisplayFolderInfo(options.AudioFolderPath);
+            }
+
+            // Câu hỏi 3: Chọn cột chuyển đổi text (bỏ qua nếu là English)
             if (!isEnglishFile)
             {
                 if (isTuVungFile)
@@ -43,7 +76,7 @@ namespace Text_to_Image.Services
                 }
             }
 
-            // Câu hỏi 3: Chọn cột âm thanh (hiển thị cho tất cả các file)
+            // Câu hỏi 4: Chọn cột âm thanh (hiển thị cho tất cả các file)
             if (isTuVungFile)
             {
                 Console.Write("\nConvert to [sound] (TuVung). Default: DH. (Enter to skip). ");
@@ -70,7 +103,7 @@ namespace Text_to_Image.Services
                 options.SoundColumns = Console.ReadLine()?.ToUpper();
             }
 
-            // Câu hỏi 4: Chọn cột Kanji (bỏ qua nếu là English)
+            // Câu hỏi 5: Chọn cột Kanji (bỏ qua nếu là English)
             if (!isEnglishFile)
             {
                 if (isTuVungFile)
@@ -122,17 +155,42 @@ namespace Text_to_Image.Services
                         options.KanjiOutputColumn = "B"; // Default for JP-ZH
                 }
             }
+        }
 
-            // Câu hỏi 5: Đổi tên file âm thanh (vẫn hiển thị cho tất cả các file)
-            Console.Write("\nDo you want to rename audio files? (Y/N): ");
-            string renameAnswer = Console.ReadLine()?.Trim().ToUpper();
-            options.RenameAudioFiles = (renameAnswer == "Y");
+        private static void SetDefaultAudioConfiguration(ProcessingOptions options)
+        {
+            string fileName = options.FileName.ToLower();
 
-            // Nếu chọn đổi tên file âm thanh, cho phép chọn folder
-            if (options.RenameAudioFiles)
+            if (fileName.Contains("tuvung"))
             {
-                options.AudioFolderPath = FolderSelector.SelectAudioFolder();
-                FolderSelector.DisplayFolderInfo(options.AudioFolderPath);
+                options.VietnameseColumn = "A"; // TuVung: VI ở cột A 
+                options.JapaneseColumn = "C";   // JP ở cột C
+                options.AudioFileType = "TUVUNG";
+            }
+            else if (fileName.Contains("english"))
+            {
+                options.VietnameseColumn = "A"; // English file: VI ở cột A
+                options.EnglishColumn = "B";    // EN ở cột B
+                options.AudioFileType = "VI-EN";
+            }
+            else if (fileName.Contains("japanese"))
+            {
+                options.EnglishColumn = "A";    // Japanese file: EN ở cột A
+                options.JapaneseColumn = "C";   // JP ở cột C
+                options.AudioFileType = "JP-EN";
+            }
+            else if (fileName.Contains("chinese"))
+            {
+                options.EnglishColumn = "A";    // Chinese file: EN ở cột A
+                options.ChineseColumn = "C";    // ZH ở cột C
+                options.AudioFileType = "ZH-EN";
+            }
+            else
+            {
+                // Default to English (VI-EN)
+                options.VietnameseColumn = "A";
+                options.EnglishColumn = "B";
+                options.AudioFileType = "VI-EN";
             }
         }
     }
