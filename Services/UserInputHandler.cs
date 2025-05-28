@@ -50,30 +50,21 @@ namespace Text_to_Image.Services
             // Câu hỏi 2: Tạo sound công thức
             if (isTuVungFile)
             {
-                Console.Write("\nCreate [sound] formulas (TuVung)? (Y/N) - E(odd-EN) & F(even-VI). ");
-                string soundAnswer = Console.ReadLine()?.Trim().ToUpper();
-                if (soundAnswer == "Y" || string.IsNullOrWhiteSpace(soundAnswer))
-                {
-                    options.SoundColumns = "EF"; // Cố định EF cho TuVung
-                }
+                Console.Write("\nCreate [sound] formulas (TuVung). Default: EF - E(odd-VI) & F(even-JP). (Enter to skip). ");
+                string soundInput = Console.ReadLine()?.ToUpper();
+                options.SoundColumns = string.IsNullOrWhiteSpace(soundInput) ? "EF" : soundInput;
             }
             else if (isJapaneseFile)
             {
-                Console.Write("\nCreate [sound] formulas (Japanese)? (Y/N) - E(odd-EN) & F(even-JP). ");
-                string soundAnswer = Console.ReadLine()?.Trim().ToUpper();
-                if (soundAnswer == "Y" || string.IsNullOrWhiteSpace(soundAnswer))
-                {
-                    options.SoundColumns = "EF"; // Cố định EF cho Japanese
-                }
+                Console.Write("\nCreate [sound] formulas (Japanese). Default: EF - E(odd-EN) & F(even-JP). (Enter to skip). ");
+                string soundInput = Console.ReadLine()?.ToUpper();
+                options.SoundColumns = string.IsNullOrWhiteSpace(soundInput) ? "EF" : soundInput;
             }
             else if (isChineseFile)
             {
-                Console.Write("\nCreate [sound] formulas (Chinese)? (Y/N) - E(odd-EN) & F(even-ZH). ");
-                string soundAnswer = Console.ReadLine()?.Trim().ToUpper();
-                if (soundAnswer == "Y" || string.IsNullOrWhiteSpace(soundAnswer))
-                {
-                    options.SoundColumns = "EF"; // Cố định EF cho Chinese
-                }
+                Console.Write("\nCreate [sound] formulas (Chinese). Default: EF - E(odd-EN) & F(even-ZH). (Enter to skip). ");
+                string soundInput = Console.ReadLine()?.ToUpper();
+                options.SoundColumns = string.IsNullOrWhiteSpace(soundInput) ? "EF" : soundInput;
             }
             else if (isEnglishFile)
             {
@@ -82,12 +73,9 @@ namespace Text_to_Image.Services
             }
             else
             {
-                Console.Write("\nCreate [sound] formulas? (Y/N) - E(odd-EN) & F(even-native). ");
-                string soundAnswer = Console.ReadLine()?.Trim().ToUpper();
-                if (soundAnswer == "Y" || string.IsNullOrWhiteSpace(soundAnswer))
-                {
-                    options.SoundColumns = "EF"; // Cố định EF
-                }
+                Console.Write("\nCreate [sound] formulas. Default: EF - E(odd-EN) & F(even-native). (Enter to skip). ");
+                string soundInput = Console.ReadLine()?.ToUpper();
+                options.SoundColumns = string.IsNullOrWhiteSpace(soundInput) ? "EF" : soundInput;
             }
 
             // Câu hỏi 3: Chọn cột Kanji (bỏ qua nếu là English)
