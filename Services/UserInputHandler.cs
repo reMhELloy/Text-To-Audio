@@ -20,56 +20,74 @@ namespace Text_to_Image.Services
             bool isJapaneseFile = fileName.Contains("japanese");
             bool isChineseFile = fileName.Contains("chinese");
 
-            // Câu hỏi 1: Chọn cột chuyển đổi text (bỏ qua nếu là English)
-            if (!isEnglishFile)
-            {
-                if (isTuVungFile)
-                {
-                    Console.Write("\nConvert to <img> (TuVung). Default: GJ for TuVung. (Enter to skip). ");
-                    options.ColumnInput = Console.ReadLine()?.ToUpper();
-                }
-                else if (isJapaneseFile)
-                {
-                    Console.Write("\nConvert to <img> (Japanese). Default: CF for Japanese. (Enter to skip). ");
-                    options.ColumnInput = Console.ReadLine()?.ToUpper();
-                }
-                else if (isChineseFile)
-                {
-                    Console.Write("\nConvert to <img> (Chinese). Default: CF for Chinese. (Enter to skip). ");
-                    options.ColumnInput = Console.ReadLine()?.ToUpper();
-                }
-                else
-                {
-                    Console.Write("\nConvert to <img> (JP-ZH). Default: CF for JP-ZH. (Enter to skip). ");
-                    options.ColumnInput = Console.ReadLine()?.ToUpper();
-                }
-            }
-
-            // Câu hỏi 2: Chọn cột âm thanh (hiển thị cho tất cả các file)
+            // Câu hỏi 1: Chọn cột chuyển đổi text (BỎ QUA ENGLISH)
             if (isTuVungFile)
             {
-                Console.Write("\nConvert to [sound] (TuVung). Default: DH. (Enter to skip). ");
-                options.SoundColumns = Console.ReadLine()?.ToUpper();
+                Console.Write("\nConvert to <img> (TuVung). Default: C -> G. (Enter to skip). ");
+                string input = Console.ReadLine()?.ToUpper();
+                options.ColumnInput = string.IsNullOrWhiteSpace(input) ? "C" : input;
+            }
+            else if (isJapaneseFile)
+            {
+                Console.Write("\nConvert to <img> (Japanese). Default: C -> G. (Enter to skip). ");
+                string input = Console.ReadLine()?.ToUpper();
+                options.ColumnInput = string.IsNullOrWhiteSpace(input) ? "C" : input;
+            }
+            else if (isChineseFile)
+            {
+                Console.Write("\nConvert to <img> (Chinese). Default: C -> G. (Enter to skip). ");
+                string input = Console.ReadLine()?.ToUpper();
+                options.ColumnInput = string.IsNullOrWhiteSpace(input) ? "C" : input;
+            }
+            else if (!isEnglishFile)
+            {
+                Console.Write("\nConvert to <img>. Default: C -> G. (Enter to skip). ");
+                string input = Console.ReadLine()?.ToUpper();
+                options.ColumnInput = string.IsNullOrWhiteSpace(input) ? "C" : input;
+            }
+            // English file: NO convert to <img> feature
+
+            // Câu hỏi 2: Tạo sound công thức
+            if (isTuVungFile)
+            {
+                Console.Write("\nCreate [sound] formulas (TuVung)? (Y/N) - E(odd-EN) & F(even-VI). ");
+                string soundAnswer = Console.ReadLine()?.Trim().ToUpper();
+                if (soundAnswer == "Y" || string.IsNullOrWhiteSpace(soundAnswer))
+                {
+                    options.SoundColumns = "EF"; // Cố định EF cho TuVung
+                }
+            }
+            else if (isJapaneseFile)
+            {
+                Console.Write("\nCreate [sound] formulas (Japanese)? (Y/N) - E(odd-EN) & F(even-JP). ");
+                string soundAnswer = Console.ReadLine()?.Trim().ToUpper();
+                if (soundAnswer == "Y" || string.IsNullOrWhiteSpace(soundAnswer))
+                {
+                    options.SoundColumns = "EF"; // Cố định EF cho Japanese
+                }
+            }
+            else if (isChineseFile)
+            {
+                Console.Write("\nCreate [sound] formulas (Chinese)? (Y/N) - E(odd-EN) & F(even-ZH). ");
+                string soundAnswer = Console.ReadLine()?.Trim().ToUpper();
+                if (soundAnswer == "Y" || string.IsNullOrWhiteSpace(soundAnswer))
+                {
+                    options.SoundColumns = "EF"; // Cố định EF cho Chinese
+                }
             }
             else if (isEnglishFile)
             {
                 Console.Write("\nConvert to [sound] (English). Default: DE for English. (Enter to skip). ");
                 options.SoundColumns = Console.ReadLine()?.ToUpper();
             }
-            else if (isJapaneseFile)
-            {
-                Console.Write("\nConvert to [sound] (Japanese). Default: E for Japanese. (Enter to skip). ");
-                options.SoundColumns = Console.ReadLine()?.ToUpper();
-            }
-            else if (isChineseFile)
-            {
-                Console.Write("\nConvert to [sound] (Chinese). Default: E for Chinese. (Enter to skip). ");
-                options.SoundColumns = Console.ReadLine()?.ToUpper();
-            }
             else
             {
-                Console.Write("\nConvert to [sound] (EN-JP-ZH). Default:DE for EN | Default: E for JP-ZH. (Enter to skip). ");
-                options.SoundColumns = Console.ReadLine()?.ToUpper();
+                Console.Write("\nCreate [sound] formulas? (Y/N) - E(odd-EN) & F(even-native). ");
+                string soundAnswer = Console.ReadLine()?.Trim().ToUpper();
+                if (soundAnswer == "Y" || string.IsNullOrWhiteSpace(soundAnswer))
+                {
+                    options.SoundColumns = "EF"; // Cố định EF
+                }
             }
 
             // Câu hỏi 3: Chọn cột Kanji (bỏ qua nếu là English)
@@ -77,51 +95,43 @@ namespace Text_to_Image.Services
             {
                 if (isTuVungFile)
                 {
-                    Console.Write("\nSelect source Kanji column (TuVung). Default: F for TuVung. (Enter to skip). ");
-                    options.KanjiColumn = Console.ReadLine()?.ToUpper();
-                    if (string.IsNullOrWhiteSpace(options.KanjiColumn))
-                        options.KanjiColumn = "F"; // Default for TuVung
+                    Console.Write("\nSelect source Kanji column (TuVung). Default: C. (Enter to skip). ");
+                    string kanjiInput = Console.ReadLine()?.ToUpper();
+                    options.KanjiColumn = string.IsNullOrWhiteSpace(kanjiInput) ? "C" : kanjiInput;
 
                     Console.Write("Select column to save processed Kanji results (TuVung). Default: B. (Enter to skip). ");
-                    options.KanjiOutputColumn = Console.ReadLine()?.ToUpper();
-                    if (string.IsNullOrWhiteSpace(options.KanjiOutputColumn))
-                        options.KanjiOutputColumn = "B"; // Default for TuVung
+                    string outputInput = Console.ReadLine()?.ToUpper();
+                    options.KanjiOutputColumn = string.IsNullOrWhiteSpace(outputInput) ? "B" : outputInput;
                 }
                 else if (isJapaneseFile)
                 {
-                    Console.Write("\nSelect source Kanji column (Japanese). Default: C for Japanese. (Enter to skip). ");
-                    options.KanjiColumn = Console.ReadLine()?.ToUpper();
-                    if (string.IsNullOrWhiteSpace(options.KanjiColumn))
-                        options.KanjiColumn = "C"; // Default for Japanese
+                    Console.Write("\nSelect source Kanji column (Japanese). Default: C. (Enter to skip). ");
+                    string kanjiInput = Console.ReadLine()?.ToUpper();
+                    options.KanjiColumn = string.IsNullOrWhiteSpace(kanjiInput) ? "C" : kanjiInput;
 
                     Console.Write("Select column to save processed Kanji results (Japanese). Default: B. (Enter to skip). ");
-                    options.KanjiOutputColumn = Console.ReadLine()?.ToUpper();
-                    if (string.IsNullOrWhiteSpace(options.KanjiOutputColumn))
-                        options.KanjiOutputColumn = "B"; // Default for Japanese
+                    string outputInput = Console.ReadLine()?.ToUpper();
+                    options.KanjiOutputColumn = string.IsNullOrWhiteSpace(outputInput) ? "B" : outputInput;
                 }
                 else if (isChineseFile)
                 {
-                    Console.Write("\nSelect source Kanji column (Chinese). Default: C for Chinese. (Enter to skip). ");
-                    options.KanjiColumn = Console.ReadLine()?.ToUpper();
-                    if (string.IsNullOrWhiteSpace(options.KanjiColumn))
-                        options.KanjiColumn = "C"; // Default for Chinese
+                    Console.Write("\nSelect source Kanji column (Chinese). Default: C. (Enter to skip). ");
+                    string kanjiInput = Console.ReadLine()?.ToUpper();
+                    options.KanjiColumn = string.IsNullOrWhiteSpace(kanjiInput) ? "C" : kanjiInput;
 
                     Console.Write("Select column to save processed Kanji results (Chinese). Default: B. (Enter to skip). ");
-                    options.KanjiOutputColumn = Console.ReadLine()?.ToUpper();
-                    if (string.IsNullOrWhiteSpace(options.KanjiOutputColumn))
-                        options.KanjiOutputColumn = "B"; // Default for Chinese
+                    string outputInput = Console.ReadLine()?.ToUpper();
+                    options.KanjiOutputColumn = string.IsNullOrWhiteSpace(outputInput) ? "B" : outputInput;
                 }
                 else
                 {
-                    Console.Write("\nSelect source Kanji column (JP-ZH). Default: C for JP-ZH. (Enter to skip). ");
-                    options.KanjiColumn = Console.ReadLine()?.ToUpper();
-                    if (string.IsNullOrWhiteSpace(options.KanjiColumn))
-                        options.KanjiColumn = "C"; // Default for JP-ZH
+                    Console.Write("\nSelect source Kanji column. Default: C. (Enter to skip). ");
+                    string kanjiInput = Console.ReadLine()?.ToUpper();
+                    options.KanjiColumn = string.IsNullOrWhiteSpace(kanjiInput) ? "C" : kanjiInput;
 
-                    Console.Write("Select column to save processed Kanji results (JP-ZH). Default: B. (Enter to skip). ");
-                    options.KanjiOutputColumn = Console.ReadLine()?.ToUpper();
-                    if (string.IsNullOrWhiteSpace(options.KanjiOutputColumn))
-                        options.KanjiOutputColumn = "B"; // Default for JP-ZH
+                    Console.Write("Select column to save processed Kanji results. Default: B. (Enter to skip). ");
+                    string outputInput = Console.ReadLine()?.ToUpper();
+                    options.KanjiOutputColumn = string.IsNullOrWhiteSpace(outputInput) ? "B" : outputInput;
                 }
             }
         }
@@ -171,7 +181,7 @@ namespace Text_to_Image.Services
             if (fileName.Contains("tuvung"))
             {
                 options.VietnameseColumn = "A"; // TuVung: VI ở cột A 
-                options.JapaneseColumn = "C";   // JP ở cột C
+                options.JapaneseColumn = "C";   // JP ở cột C 
                 options.AudioFileType = "TUVUNG";
             }
             else if (fileName.Contains("english"))
@@ -194,7 +204,7 @@ namespace Text_to_Image.Services
             }
             else
             {
-                // Default to English (VI-EN)
+                // Default to Vietnamese-English
                 options.VietnameseColumn = "A";
                 options.EnglishColumn = "B";
                 options.AudioFileType = "VI-EN";

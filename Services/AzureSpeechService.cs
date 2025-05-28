@@ -1,14 +1,6 @@
 ﻿using Microsoft.CognitiveServices.Speech;
-using Microsoft.CognitiveServices.Speech.Audio;
 using OfficeOpenXml;
-using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Threading.Tasks;
 using Text_to_Image.Models;
-using Text_to_Image.Config;
-using System.Threading;
-using System.Linq;
 
 namespace Text_to_Image.Services
 {
@@ -17,7 +9,18 @@ namespace Text_to_Image.Services
         private readonly string _speechKey;
         private readonly string _speechRegion;
         private readonly SpeechConfig _speechConfig;
+        private int GetColumnIndex(string columnLetter)
+        {
+            if (string.IsNullOrEmpty(columnLetter))
+                return 1;
 
+            int result = 0;
+            for (int i = 0; i < columnLetter.Length; i++)
+            {
+                result = result * 26 + (columnLetter[i] - 'A' + 1);
+            }
+            return result;
+        }
         public AzureSpeechService(string speechKey, string speechRegion)
         {
             _speechKey = speechKey;
@@ -28,7 +31,7 @@ namespace Text_to_Image.Services
             _speechConfig.SetSpeechSynthesisOutputFormat(SpeechSynthesisOutputFormat.Audio16Khz32KBitRateMonoMp3);
         }
 
-        // Tạo file âm thanh từ text với giọng nói tùy chọn
+        // Tạo file âm thanh từ text với giọng nói tùy chọn - CÓ CHẤT LƯỢNG CHO NGƯỜI MỚI HỌC
         public async Task<bool> CreateAudioFile(string text, string outputPath, string voiceName = "en-US-JennyNeural")
         {
             try
@@ -47,10 +50,13 @@ namespace Text_to_Image.Services
                     Directory.CreateDirectory(directory);
                 }
 
+                // Tạo SSML với cấu hình phù hợp cho người mới học
+                string ssmlText = CreateSSMLForLearners(text, voiceName);
+
                 // Sử dụng synthesizer mà không cần AudioConfig để lấy raw audio data
                 using var synthesizer = new SpeechSynthesizer(_speechConfig, null);
 
-                var result = await synthesizer.SpeakTextAsync(text);
+                var result = await synthesizer.SpeakSsmlAsync(ssmlText);
 
                 if (result.Reason == ResultReason.SynthesizingAudioCompleted)
                 {
@@ -72,6 +78,52 @@ namespace Text_to_Image.Services
                 Console.WriteLine($"✗ {Path.GetFileName(outputPath)}: {ex.Message}");
                 return false;
             }
+        }
+
+        // Tạo SSML với cấu hình tối ưu cho người mới học
+        private string CreateSSMLForLearners(string text, string voiceName)
+        {
+            // Xác định tốc độ đọc và style dựa trên giọng nói
+            string rate = "1.0"; // Tốc độ bình thường cho tiếng Việt
+            string style = "";
+
+            // Cấu hình tùy chỉnh cho từng ngôn ngữ
+            if (voiceName.Contains("en-US") || voiceName.Contains("en-GB"))
+            {
+                rate = "0.75"; // Tiếng Anh đọc chậm hơn nữa
+                style = @"style=""calm"""; // Giọng điềm tĩnh cho tiếng Anh
+            }
+            else if (voiceName.Contains("ja-JP"))
+            {
+                rate = "0.7"; // Tiếng Nhật đọc rất chậm
+                style = @"style=""calm"""; // Giọng điềm tĩnh
+            }
+            else if (voiceName.Contains("zh-CN") || voiceName.Contains("zh-TW"))
+            {
+                rate = "0.7"; // Tiếng Trung đọc rất chậm
+                style = @"style=""calm"""; // Giọng điềm tĩnh
+            }
+            else if (voiceName.Contains("vi-VN"))
+            {
+                rate = "1.0"; // Tiếng Việt đọc bình thường - KHÔNG CHẬM
+                style = @"style=""calm"""; // Giọng điềm tĩnh
+            }
+
+            // Escape XML characters trong text
+            string escapedText = System.Security.SecurityElement.Escape(text);
+
+            // Tạo SSML với silent đầu/cuối và tốc độ phù hợp
+            string ssml = $@"<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='en-US'>
+<voice name='{voiceName}'>
+<break time='200ms'/>
+<prosody rate='{rate}' {style}>
+{escapedText}
+</prosody>
+<break time='300ms'/>
+</voice>
+</speak>";
+
+            return ssml;
         }
 
         // Xử lý tạo âm thanh từ Excel
@@ -99,7 +151,7 @@ namespace Text_to_Image.Services
                     return;
                 }
 
-                Console.WriteLine($"Creating {audioFiles.Count} audio files...");
+                Console.WriteLine($"Creating {audioFiles.Count} audio files with optimized settings for learners...");
 
                 // Đọc text từ Excel và set đường dẫn output
                 foreach (var audioFile in audioFiles)
@@ -125,7 +177,7 @@ namespace Text_to_Image.Services
                 semaphore.Dispose();
 
                 int successCount = audioFiles.Count(af => !string.IsNullOrEmpty(af.SourceText));
-                Console.WriteLine($"Completed! Created {successCount} audio files.");
+                Console.WriteLine($"Completed! Created {successCount} audio files with learner-friendly settings.");
 
                 // Thêm delay nhỏ để đảm bảo tất cả file operations hoàn thành
                 await Task.Delay(500);
@@ -152,17 +204,11 @@ namespace Text_to_Image.Services
             }
         }
 
-        private int GetColumnIndex(string columnLetter)
+        // Method để test SSML output (có thể dùng để debug)
+        public string GetSSMLPreview(string text, string voiceName)
         {
-            if (string.IsNullOrEmpty(columnLetter))
-                return 1;
-
-            int result = 0;
-            for (int i = 0; i < columnLetter.Length; i++)
-            {
-                result = result * 26 + (columnLetter[i] - 'A' + 1);
-            }
-            return result;
+            return CreateSSMLForLearners(text, voiceName);
         }
     }
+
 }
