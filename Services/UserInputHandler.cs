@@ -161,6 +161,45 @@ namespace Text_to_Image.Services
                 AudioFolderManager.DisplayFolderInfo(options.AudioFolderPath);
             }
         }
+        // Method 4: HỎI VÀ THỰC HIỆN DATABASE SAVE NGAY - SAU KHI Excel và Audio hoàn thành
+        public static async Task HandleDatabaseSave(ProcessingOptions options)
+        {
+            Console.Write("\nDo you want to save data to SQL Server database? (Y/N): ");
+            string saveDatabaseAnswer = Console.ReadLine()?.Trim().ToUpper();
+
+            if (saveDatabaseAnswer == "Y")
+            {
+                try
+                {
+                    Console.WriteLine("✅ Saving data to SQL Server...");
+                    Console.WriteLine(new string('=', 50));
+
+                    using var dbService = new Text_to_Image.Data.DatabaseService();
+                    var session = await dbService.SaveExcelDataToDatabaseAsync(options);
+
+                    Console.WriteLine($"\n📊 Database Summary:");
+                    Console.WriteLine($"✅ Session ID: {session.SessionId}");
+                    Console.WriteLine($"✅ Processed: {session.ProcessedRows} vocabulary entries");
+                    Console.WriteLine($"✅ Audio records: {session.AudioFilesCreated}");
+                    Console.WriteLine($"✅ File type: {session.FileType}");
+                    Console.WriteLine($"✅ Date: {session.DateUsed}");
+                    Console.WriteLine(new string('=', 50));
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"❌ Database save failed: {ex.Message}");
+                    Console.WriteLine("Excel processing completed but data not saved to database.");
+                    if (ex.InnerException != null)
+                    {
+                        Console.WriteLine($"Error details: {ex.InnerException.Message}");
+                    }
+                }
+            }
+            else
+            {
+                Console.WriteLine("ℹ️ Database save skipped (Excel only mode).");
+            }
+        }
 
         private static void SetDefaultAudioConfiguration(ProcessingOptions options)
         {

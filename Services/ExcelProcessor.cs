@@ -6,7 +6,7 @@ using System.Text;
 using System.Threading.Tasks;
 using JapaneseConverter;
 using Text_to_Image.Models;
-using static Microsoft.IO.RecyclableMemoryStreamManager;
+using Text_to_Image.Data;
 
 namespace Text_to_Image.Services
 {
@@ -369,6 +369,62 @@ namespace Text_to_Image.Services
                 Console.WriteLine("Starting new process...");
                 Console.WriteLine("========================================\n");
                 return true;
+            }
+        }
+        public static async Task ExecuteTasksWithDatabase(ProcessingOptions options)
+        {
+            // Audio file renaming
+            if (options.RenameAudioFiles)
+            {
+                AudioFileManager.RenameAudioFiles(options.AudioFolderPath, options.SelectedDay,
+                    options.SelectedMonth, options.SelectedYear, options.FileName);
+            }
+
+            // Excel processing
+            if (!string.IsNullOrWhiteSpace(options.ColumnInput) ||
+                !string.IsNullOrWhiteSpace(options.SoundColumns) ||
+                !string.IsNullOrWhiteSpace(options.KanjiColumn))
+            {
+                ExcelProcessor.ProcessExcelFile(options);
+            }
+            else
+            {
+                Console.WriteLine("No tasks selected to perform...");
+                return;
+            }
+
+            // Save to database ONLY if user chose to
+            if (options.SaveToDatabase)
+            {
+                try
+                {
+                    Console.WriteLine("\n" + new string('=', 50));
+
+                    using var dbService = new DatabaseService();
+                    var session = await dbService.SaveExcelDataToDatabaseAsync(options);
+
+                    Console.WriteLine($"\n📊 Database Summary:");
+                    Console.WriteLine($"✅ Session ID: {session.SessionId}");
+                    Console.WriteLine($"✅ Processed: {session.ProcessedRows} vocabulary entries");
+                    Console.WriteLine($"✅ Audio records: {session.AudioFilesCreated}");
+                    Console.WriteLine($"✅ File type: {session.FileType}");
+                    Console.WriteLine($"✅ Date: {session.DateUsed}");
+                    Console.WriteLine(new string('=', 50));
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"\n❌ Database save failed: {ex.Message}");
+                    Console.WriteLine("Excel processing completed but data not saved to database.");
+                    Console.WriteLine("Please check your SQL Server connection.");
+
+                    // Log chi tiết lỗi để debug
+                    Console.WriteLine($"Error details: {ex.InnerException?.Message}");
+                }
+            }
+            else
+            {
+                Console.WriteLine("\n💾 Database save skipped (user choice).");
+                Console.WriteLine("Excel processing completed successfully without database save.");
             }
         }
     }

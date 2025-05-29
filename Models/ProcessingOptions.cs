@@ -24,6 +24,8 @@ namespace Text_to_Image.Models
         public string AudioOutputFolder { get; set; }
         public bool CreateAudioFiles { get; set; } = false;
 
+        public bool SaveToDatabase { get; set; } = false;
+
         // Audio source columns
         public string VietnameseColumn { get; set; }
         public string EnglishColumn { get; set; }

@@ -46,9 +46,9 @@ public class Program
                 // Step 4: Get Excel Processing Inputs ONLY
                 UserInputHandler.GetExcelProcessingInputs(options);
 
-                // Step 5: Execute Excel Tasks - Đợi hoàn thành hoàn toàn
+                // Step 5: Execute Excel Tasks - Đợi hoàn thành hoàn toàn (KHÔNG còn database save ở đây)
                 Console.WriteLine("Processing Excel tasks...");
-                ExcelProcessor.ExecuteTasks(options);
+                ExcelProcessor.ExecuteTasks(options); // Quay về method cũ
                 Console.WriteLine("Excel processing completed.\n");
 
                 // Step 6: Ask Audio Creation Question - SAU KHI Excel hoàn thành
@@ -62,10 +62,13 @@ public class Program
                     Console.WriteLine("Audio creation completed.\n");
                 }
 
-                // Step 8: Ask Audio Rename Question - SAU KHI Audio Creation hoàn thành
+                // Step 8: Ask and Handle Database Save - MỚI THÊM
+                await UserInputHandler.HandleDatabaseSave(options);
+
+                // Step 9: Ask Audio Rename Question - SAU KHI Database save
                 UserInputHandler.GetAudioRenameInputs(options);
 
-                // Step 9: Execute Audio Rename - Đợi hoàn thành hoàn toàn
+                // Step 10: Execute Audio Rename - Đợi hoàn thành hoàn toàn
                 if (options.RenameAudioFiles)
                 {
                     Console.WriteLine("Renaming audio files...");
@@ -75,7 +78,7 @@ public class Program
                     Console.WriteLine("Audio renaming completed.\n");
                 }
 
-                // Step 7: Continue?
+                // Step 11: Continue?
                 continueRunning = ExcelProcessor.AskToContinue();
             }
             catch (Exception ex)
