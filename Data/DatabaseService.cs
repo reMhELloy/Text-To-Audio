@@ -41,27 +41,21 @@ namespace Text_to_Image.Data
                 _context.ProcessingSessions.Add(session);
                 await _context.SaveChangesAsync();
 
-                // Đọc và lưu dữ liệu từ Excel
-                var vocabularies = await ReadExcelAndCreateVocabularies(options, session.SessionId);
+                // Đọc và xử lý dữ liệu từ Excel với duplicate checking
+                var result = await ProcessExcelWithDuplicateChecking(options, session.SessionId);
 
-                if (vocabularies.Any())
+                if (result.NewVocabularies.Any())
                 {
-                    _context.Vocabularies.AddRange(vocabularies);
-                    await _context.SaveChangesAsync(); // Save vocabularies FIRST để có VocabId
+                    _context.Vocabularies.AddRange(result.NewVocabularies);
+                    await _context.SaveChangesAsync();
 
-                    Console.WriteLine($"✅ Saved {vocabularies.Count} vocabulary entries to database.");
+                    Console.WriteLine($"✅ Saved {result.NewVocabularies.Count} NEW vocabulary entries to database.");
+                    Console.WriteLine($"⚠️ Skipped {result.SkippedCount} duplicate entries.");
 
-                    // DEBUG: Check audio creation conditions
-                    Console.WriteLine($"🔍 Audio creation check:");
-                    Console.WriteLine($"   options.CreateAudioFiles: {options.CreateAudioFiles}");
-                    Console.WriteLine($"   options.SoundColumns: '{options.SoundColumns}'");
-                    Console.WriteLine($"   SoundColumns null/empty: {string.IsNullOrWhiteSpace(options.SoundColumns)}");
-
-                    // Tạo audio file records nếu có - SAU KHI vocabularies đã có ID
+                    // Tạo audio file records và update Excel
                     if (options.CreateAudioFiles && !string.IsNullOrWhiteSpace(options.SoundColumns))
                     {
-                        Console.WriteLine("✅ Conditions met - creating audio files...");
-                        var audioFiles = CreateAudioFileRecords(vocabularies, options); // Remove await
+                        var audioFiles = CreateAudioFileRecordsWithExcelUpdate(result.VocabularyMappings, options);
                         if (audioFiles.Any())
                         {
                             _context.AudioFiles.AddRange(audioFiles);
@@ -70,22 +64,12 @@ namespace Text_to_Image.Data
                             session.AudioFilesCreated = audioFiles.Count;
                             Console.WriteLine($"✅ Created {audioFiles.Count} audio file records.");
                         }
-                        else
-                        {
-                            Console.WriteLine("❌ No audio files generated from CreateAudioFileRecords");
-                        }
-                    }
-                    else
-                    {
-                        Console.WriteLine($"❌ Audio creation skipped:");
-                        Console.WriteLine($"   CreateAudioFiles: {options.CreateAudioFiles}");
-                        Console.WriteLine($"   SoundColumns: '{options.SoundColumns}'");
                     }
                 }
 
                 // Cập nhật session
-                session.ProcessedRows = vocabularies.Count;
-                session.TotalRows = vocabularies.Count;
+                session.ProcessedRows = result.NewVocabularies.Count;
+                session.TotalRows = result.TotalProcessed;
                 session.IsCompleted = true;
 
                 await _context.SaveChangesAsync();
@@ -98,6 +82,339 @@ namespace Text_to_Image.Data
                 Console.WriteLine($"❌ Error saving to database: {ex.Message}");
                 throw;
             }
+        }
+
+        // 🔍 METHOD MỚI: Xử lý Excel với duplicate checking - CHỈ TRONG CÙNG NGÀY
+        private async Task<ProcessingResult> ProcessExcelWithDuplicateChecking(ProcessingOptions options, int sessionId)
+        {
+            var result = new ProcessingResult();
+            string dateToUse = options.CustomDate ?? DateTime.Now.ToString("dd-MM-yyyy");
+
+            // Lấy existing vocabulary cho CÙNG NGÀY và CÙNG FILE TYPE
+            var existingVocabsToday = await GetExistingVocabulariesForDate(dateToUse, DetermineFileType(options.FileName));
+
+            Console.WriteLine($"📅 Processing date: {dateToUse}");
+            Console.WriteLine($"📂 File type: {DetermineFileType(options.FileName)}");
+            Console.WriteLine($"🔍 Existing vocabularies TODAY: {existingVocabsToday.Count}");
+            Console.WriteLine($"ℹ️  Note: Only checking duplicates within the SAME DAY");
+
+            ExcelPackage.LicenseContext = LicenseContext.NonCommercial;
+            using var package = new ExcelPackage(new FileInfo(options.SelectedFile));
+            var worksheet = package.Workbook.Worksheets[0];
+            int rowCount = worksheet.Dimension?.End.Row ?? 0;
+
+            if (rowCount == 0) return result;
+
+            string fileType = DetermineFileType(options.FileName);
+
+            for (int row = 1; row <= rowCount; row++)
+            {
+                var vocab = CreateVocabularyFromExcelRow(worksheet, row, fileType, options.SelectedFile);
+
+                // Kiểm tra duplicate - CHỈ với data của cùng ngày
+                bool isDuplicate = CheckIfDuplicate(vocab, existingVocabsToday);
+
+                if (isDuplicate)
+                {
+                    Console.WriteLine($"⚠️ Row {row}: Duplicate found in TODAY's data, skipping...");
+                    result.VocabularyMappings.Add(new VocabularyMapping
+                    {
+                        ExcelRow = row,
+                        Vocabulary = null,
+                        IsSkipped = true
+                    });
+                    result.SkippedCount++;
+                }
+                else
+                {
+                    result.NewVocabularies.Add(vocab);
+                    result.VocabularyMappings.Add(new VocabularyMapping
+                    {
+                        ExcelRow = row,
+                        Vocabulary = vocab,
+                        IsSkipped = false
+                    });
+                    Console.WriteLine($"✅ Row {row}: New vocabulary (not duplicate in today's data)");
+                }
+
+                result.TotalProcessed++;
+            }
+
+            Console.WriteLine($"\n📊 Summary:");
+            Console.WriteLine($"   📝 Total rows processed: {result.TotalProcessed}");
+            Console.WriteLine($"   ✅ New vocabularies: {result.NewVocabularies.Count}");
+            Console.WriteLine($"   ⚠️ Duplicates (same day): {result.SkippedCount}");
+
+            return result;
+        }
+
+        // 🔍 METHOD MỚI: Tạo audio records và update Excel sound formulas
+        private List<AudioFile> CreateAudioFileRecordsWithExcelUpdate(List<VocabularyMapping> mappings, ProcessingOptions options)
+        {
+            var audioFiles = new List<AudioFile>();
+            string dateToUse = options.CustomDate ?? DateTime.Now.ToString("dd-MM-yyyy");
+
+            // Lấy existing audio count
+            int existingAudioCount = GetExistingAudioCountForDate(dateToUse, options.AudioFileType);
+            Console.WriteLine($"🔍 Found {existingAudioCount} existing audio files for date {dateToUse}");
+
+            int currentAudioNumber = existingAudioCount + 1;
+
+            // Mở Excel để update sound formulas
+            ExcelPackage.LicenseContext = LicenseContext.NonCommercial;
+            using var package = new ExcelPackage(new FileInfo(options.SelectedFile));
+            var worksheet = package.Workbook.Worksheets[0];
+
+            foreach (var mapping in mappings)
+            {
+                if (mapping.IsSkipped)
+                {
+                    // Nếu skip thì clear sound formulas trong Excel
+                    ClearSoundFormulasInExcel(worksheet, mapping.ExcelRow, options);
+                    Console.WriteLine($"🔄 Row {mapping.ExcelRow}: Cleared sound formulas (duplicate)");
+                    continue;
+                }
+
+                // Tạo audio files cho vocabulary mới
+                var vocab = mapping.Vocabulary;
+                int oddNumber = currentAudioNumber;
+                int evenNumber = currentAudioNumber + 1;
+
+                // Update sound formulas trong Excel
+                UpdateSoundFormulasInExcel(worksheet, mapping.ExcelRow, options, dateToUse, oddNumber, evenNumber);
+
+                // Tạo audio file records
+                var newAudioFiles = CreateAudioFilesForVocabulary(vocab, options, dateToUse, oddNumber, evenNumber);
+                audioFiles.AddRange(newAudioFiles);
+
+                currentAudioNumber += 2; // Mỗi vocabulary tạo 2 files (odd + even)
+                Console.WriteLine($"🔄 Row {mapping.ExcelRow}: Updated sound formulas to {oddNumber:00}, {evenNumber:00}");
+            }
+
+            // Lưu Excel file với sound formulas đã update
+            try
+            {
+                package.Save();
+                Console.WriteLine("✅ Excel sound formulas updated successfully!");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"⚠️ Warning: Could not update Excel file: {ex.Message}");
+            }
+
+            return audioFiles;
+        }
+
+        // 🔍 METHOD MỚI: Update sound formulas trong Excel
+        private void UpdateSoundFormulasInExcel(ExcelWorksheet worksheet, int row, ProcessingOptions options,
+            string dateToUse, int oddNumber, int evenNumber)
+        {
+            if (string.IsNullOrWhiteSpace(options.SoundColumns) || options.SoundColumns.Length < 2) return;
+
+            string fileType = DetermineFileType(options.FileName);
+
+            switch (fileType.ToLower())
+            {
+                case "japanese":
+                    // E (odd-EN), F (even-JP)
+                    worksheet.Cells[row, 5].Value = $"[sound:EN-{dateToUse}_{oddNumber:00}.mp3]";
+                    worksheet.Cells[row, 6].Value = $"[sound:JP-{dateToUse}_{evenNumber:00}.mp3]";
+                    break;
+
+                case "chinese":
+                    // E (odd-EN), F (even-ZH)
+                    worksheet.Cells[row, 5].Value = $"[sound:EN-{dateToUse}_{oddNumber:00}.mp3]";
+                    worksheet.Cells[row, 6].Value = $"[sound:ZH-{dateToUse}_{evenNumber:00}.mp3]";
+                    break;
+
+                case "tuvung":
+                    // E (odd-EN), F (even-VI)
+                    worksheet.Cells[row, 5].Value = $"[sound:EN-{dateToUse}_{oddNumber:00}.mp3]";
+                    worksheet.Cells[row, 6].Value = $"[sound:VI-{dateToUse}_{evenNumber:00}.mp3]";
+                    break;
+
+                case "english":
+                    // D, E columns
+                    if (options.SoundColumns.Length >= 2)
+                    {
+                        int col1 = options.SoundColumns[0] - 'A' + 1;
+                        int col2 = options.SoundColumns[1] - 'A' + 1;
+                        worksheet.Cells[row, col1].Value = $"[sound:EN-{dateToUse}_{oddNumber:00}.mp3]";
+                        worksheet.Cells[row, col2].Value = $"[sound:EN-{dateToUse}_{evenNumber:00}.mp3]";
+                    }
+                    break;
+            }
+        }
+
+        // 🔍 METHOD MỚI: Clear sound formulas trong Excel cho duplicate rows
+        private void ClearSoundFormulasInExcel(ExcelWorksheet worksheet, int row, ProcessingOptions options)
+        {
+            if (string.IsNullOrWhiteSpace(options.SoundColumns)) return;
+
+            string fileType = DetermineFileType(options.FileName);
+
+            switch (fileType.ToLower())
+            {
+                case "japanese":
+                case "chinese":
+                case "tuvung":
+                    worksheet.Cells[row, 5].Value = ""; // Column E
+                    worksheet.Cells[row, 6].Value = ""; // Column F
+                    break;
+
+                case "english":
+                    if (options.SoundColumns.Length >= 2)
+                    {
+                        int col1 = options.SoundColumns[0] - 'A' + 1;
+                        int col2 = options.SoundColumns[1] - 'A' + 1;
+                        worksheet.Cells[row, col1].Value = "";
+                        worksheet.Cells[row, col2].Value = "";
+                    }
+                    break;
+            }
+        }
+
+        // 🔍 METHOD MỚI: Tạo audio files cho 1 vocabulary
+        private List<AudioFile> CreateAudioFilesForVocabulary(Vocabulary vocab, ProcessingOptions options,
+            string dateToUse, int oddNumber, int evenNumber)
+        {
+            var audioFiles = new List<AudioFile>();
+
+            switch (options.AudioFileType)
+            {
+                case "VI-EN":
+                    if (!string.IsNullOrWhiteSpace(vocab.VietnameseText))
+                        audioFiles.Add(CreateAudioFileRecord(vocab.VocabId, "VI",
+                            $"EN-{dateToUse}_{oddNumber:00}.mp3", "vi-VN-HoaiMyNeural", 1.0m, true));
+                    if (!string.IsNullOrWhiteSpace(vocab.EnglishText))
+                        audioFiles.Add(CreateAudioFileRecord(vocab.VocabId, "EN",
+                            $"EN-{dateToUse}_{evenNumber:00}.mp3", "en-US-JennyNeural", 0.75m, false));
+                    break;
+
+                case "JP-EN":
+                    if (!string.IsNullOrWhiteSpace(vocab.EnglishText))
+                        audioFiles.Add(CreateAudioFileRecord(vocab.VocabId, "EN",
+                            $"JP-{dateToUse}_{oddNumber:00}.mp3", "en-US-JennyNeural", 0.75m, true));
+                    if (!string.IsNullOrWhiteSpace(vocab.JapaneseText))
+                        audioFiles.Add(CreateAudioFileRecord(vocab.VocabId, "JP",
+                            $"JP-{dateToUse}_{evenNumber:00}.mp3", "ja-JP-NanamiNeural", 0.7m, false));
+                    break;
+
+                case "ZH-EN":
+                    if (!string.IsNullOrWhiteSpace(vocab.EnglishText))
+                        audioFiles.Add(CreateAudioFileRecord(vocab.VocabId, "EN",
+                            $"ZH-{dateToUse}_{oddNumber:00}.mp3", "en-US-JennyNeural", 0.75m, true));
+                    if (!string.IsNullOrWhiteSpace(vocab.ChineseText))
+                        audioFiles.Add(CreateAudioFileRecord(vocab.VocabId, "ZH",
+                            $"ZH-{dateToUse}_{evenNumber:00}.mp3", "zh-CN-XiaoxiaoNeural", 0.7m, false));
+                    break;
+
+                case "TUVUNG":
+                    if (!string.IsNullOrWhiteSpace(vocab.VietnameseText))
+                        audioFiles.Add(CreateAudioFileRecord(vocab.VocabId, "VI",
+                            $"Vocab-{dateToUse}_{oddNumber:00}.mp3", "vi-VN-HoaiMyNeural", 1.0m, true));
+                    if (!string.IsNullOrWhiteSpace(vocab.JapaneseText))
+                        audioFiles.Add(CreateAudioFileRecord(vocab.VocabId, "JP",
+                            $"Vocab-{dateToUse}_{evenNumber:00}.mp3", "ja-JP-NanamiNeural", 0.7m, false));
+                    break;
+            }
+
+            return audioFiles;
+        }
+
+        // 🔍 METHOD MỚI: Lấy existing vocabularies cho CÙNG NGÀY cụ thể
+        private async Task<List<Vocabulary>> GetExistingVocabulariesForDate(string dateString, string fileType)
+        {
+            if (!DateTime.TryParseExact(dateString, "dd-MM-yyyy", null,
+                System.Globalization.DateTimeStyles.None, out DateTime targetDate))
+            {
+                Console.WriteLine($"⚠️ Invalid date format: {dateString}, no duplicate checking");
+                return new List<Vocabulary>();
+            }
+
+            var existingVocabs = await _context.Vocabularies
+                .Where(v => v.CreatedDate.Date == targetDate.Date && v.Category == fileType)
+                .ToListAsync();
+
+            Console.WriteLine($"🔍 Checking duplicates for: {targetDate:dd-MM-yyyy} ({fileType})");
+            Console.WriteLine($"🔍 Found {existingVocabs.Count} existing vocabularies for TODAY ONLY");
+
+            return existingVocabs;
+        }
+
+        // 🔍 METHOD MỚI: Kiểm tra duplicate - CHỈ TRONG CÙNG NGÀY
+        private bool CheckIfDuplicate(Vocabulary newVocab, List<Vocabulary> existingVocabsToday)
+        {
+            // CHỈ kiểm tra với vocabularies của cùng ngày
+            bool isDuplicate = existingVocabsToday.Any(existing =>
+                (SimilarText(existing.EnglishText, newVocab.EnglishText) ||
+                 SimilarText(existing.JapaneseText, newVocab.JapaneseText) ||
+                 SimilarText(existing.ChineseText, newVocab.ChineseText) ||
+                 SimilarText(existing.VietnameseText, newVocab.VietnameseText))
+            );
+
+            if (isDuplicate)
+            {
+                Console.WriteLine($"   🔍 Duplicate found in TODAY's data");
+            }
+            else
+            {
+                Console.WriteLine($"   ✅ New vocabulary (not duplicate in today's data)");
+            }
+
+            return isDuplicate;
+        }
+
+        // 🔍 METHOD MỚI: So sánh text tương tự
+        private bool SimilarText(string text1, string text2)
+        {
+            if (string.IsNullOrWhiteSpace(text1) || string.IsNullOrWhiteSpace(text2))
+                return false;
+
+            return text1.Trim().Equals(text2.Trim(), StringComparison.OrdinalIgnoreCase);
+        }
+
+        // 🔍 METHOD MỚI: Tạo vocabulary từ Excel row
+        private Vocabulary CreateVocabularyFromExcelRow(ExcelWorksheet worksheet, int row, string fileType, string sourceFile)
+        {
+            var vocab = new Vocabulary
+            {
+                SourceFile = Path.GetFileName(sourceFile),
+                Category = fileType,
+                CreatedDate = DateTime.UtcNow,
+                ImageTags = ""
+            };
+
+            switch (fileType.ToLower())
+            {
+                case "english":
+                    vocab.VietnameseText = GetCellValue(worksheet, row, 1);
+                    vocab.EnglishText = GetCellValue(worksheet, row, 2);
+                    break;
+                case "japanese":
+                    vocab.EnglishText = GetCellValue(worksheet, row, 1);
+                    vocab.ReadingText = GetCellValue(worksheet, row, 2);
+                    vocab.JapaneseText = GetCellValue(worksheet, row, 3);
+                    vocab.KanjiText = GetCellValue(worksheet, row, 2);
+                    vocab.ImageTags = GetCellValue(worksheet, row, 7);
+                    break;
+                case "chinese":
+                    vocab.EnglishText = GetCellValue(worksheet, row, 1);
+                    vocab.ReadingText = GetCellValue(worksheet, row, 2);
+                    vocab.ChineseText = GetCellValue(worksheet, row, 3);
+                    vocab.KanjiText = GetCellValue(worksheet, row, 2);
+                    vocab.ImageTags = GetCellValue(worksheet, row, 7);
+                    break;
+                case "tuvung":
+                    vocab.VietnameseText = GetCellValue(worksheet, row, 1);
+                    vocab.ReadingText = GetCellValue(worksheet, row, 2);
+                    vocab.JapaneseText = GetCellValue(worksheet, row, 3);
+                    vocab.KanjiText = GetCellValue(worksheet, row, 2);
+                    vocab.ImageTags = GetCellValue(worksheet, row, 7);
+                    break;
+            }
+
+            return vocab;
         }
 
         private async Task<List<Vocabulary>> ReadExcelAndCreateVocabularies(ProcessingOptions options, int sessionId)
@@ -339,9 +656,140 @@ namespace Text_to_Image.Data
                 .ToListAsync();
         }
 
+        // 🔍 METHOD MỚI: Lấy summary data cho smart processing
+        public async Task<ExistingDataSummary> GetExistingDataSummary(string dateString, string fileType, string audioFileType)
+        {
+            var summary = new ExistingDataSummary();
+
+            try
+            {
+                if (!DateTime.TryParseExact(dateString, "dd-MM-yyyy", null,
+                    System.Globalization.DateTimeStyles.None, out DateTime targetDate))
+                {
+                    return summary; // Return empty summary
+                }
+
+                // Count existing vocabularies for this date and file type
+                summary.VocabularyCount = await _context.Vocabularies
+                    .Where(v => v.CreatedDate.Date == targetDate.Date && v.Category == fileType)
+                    .CountAsync();
+
+                // Count existing audio files for this date and audio file type
+                summary.AudioFileCount = await GetExistingAudioCountForDateAsync(dateString, audioFileType);
+
+                // Calculate next audio number
+                summary.NextAudioNumber = summary.AudioFileCount + 1;
+
+                return summary;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"⚠️ Error getting existing data summary: {ex.Message}");
+                return summary;
+            }
+        }
+        // Method sync để lấy existing audio count
+        private int GetExistingAudioCountForDate(string dateString, string audioFileType)
+        {
+            try
+            {
+                // Tạo pattern dựa trên AudioFileType
+                string fileNamePattern = "";
+                switch (audioFileType)
+                {
+                    case "VI-EN":
+                        fileNamePattern = $"EN-{dateString}_";
+                        break;
+                    case "JP-EN":
+                        fileNamePattern = $"JP-{dateString}_";
+                        break;
+                    case "ZH-EN":
+                        fileNamePattern = $"ZH-{dateString}_";
+                        break;
+                    case "TUVUNG":
+                        fileNamePattern = $"Vocab-{dateString}_";
+                        break;
+                    default:
+                        return 0;
+                }
+
+                // Đếm số audio files có pattern này trong database (sync)
+                var count = _context.AudioFiles
+                    .Where(a => a.FileName.StartsWith(fileNamePattern))
+                    .Count(); // Sử dụng Count() thay vì CountAsync()
+
+                return count;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"⚠️ Warning: Could not check existing audio files: {ex.Message}");
+                return 0;
+            }
+        }
+
+        // 🔍 METHOD MỚI: Async version của GetExistingAudioCountForDate
+        private async Task<int> GetExistingAudioCountForDateAsync(string dateString, string audioFileType)
+        {
+            try
+            {
+                // Tạo pattern dựa trên AudioFileType
+                string fileNamePattern = "";
+                switch (audioFileType)
+                {
+                    case "VI-EN":
+                        fileNamePattern = $"EN-{dateString}_";
+                        break;
+                    case "JP-EN":
+                        fileNamePattern = $"JP-{dateString}_";
+                        break;
+                    case "ZH-EN":
+                        fileNamePattern = $"ZH-{dateString}_";
+                        break;
+                    case "TUVUNG":
+                        fileNamePattern = $"Vocab-{dateString}_";
+                        break;
+                    default:
+                        return 0;
+                }
+
+                // Đếm số audio files có pattern này trong database
+                var count = await _context.AudioFiles
+                    .Where(a => a.FileName.StartsWith(fileNamePattern))
+                    .CountAsync();
+
+                return count;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"⚠️ Warning: Could not check existing audio files: {ex.Message}");
+                return 0; // Nếu lỗi thì bắt đầu từ 1
+            }
+        }
         public void Dispose()
         {
             _context?.Dispose();
         }
+    }
+
+    // Helper classes cho existing data summary
+    public class ExistingDataSummary
+    {
+        public int VocabularyCount { get; set; } = 0;
+        public int AudioFileCount { get; set; } = 0;
+        public int NextAudioNumber { get; set; } = 1;
+    }
+    public class ProcessingResult
+    {
+        public List<Vocabulary> NewVocabularies { get; set; } = new List<Vocabulary>();
+        public List<VocabularyMapping> VocabularyMappings { get; set; } = new List<VocabularyMapping>();
+        public int SkippedCount { get; set; } = 0;
+        public int TotalProcessed { get; set; } = 0;
+    }
+
+    public class VocabularyMapping
+    {
+        public int ExcelRow { get; set; }
+        public Vocabulary? Vocabulary { get; set; }
+        public bool IsSkipped { get; set; }
     }
 }

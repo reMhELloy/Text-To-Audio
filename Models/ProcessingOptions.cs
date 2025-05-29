@@ -25,7 +25,8 @@ namespace Text_to_Image.Models
         public bool CreateAudioFiles { get; set; } = false;
 
         public bool SaveToDatabase { get; set; } = false;
-
+        public int ExistingAudioCount { get; set; } = 0;
+        public int NextAudioNumber { get; set; } = 1;
         // Audio source columns
         public string VietnameseColumn { get; set; }
         public string EnglishColumn { get; set; }

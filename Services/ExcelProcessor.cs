@@ -1,8 +1,7 @@
 ﻿using OfficeOpenXml;
 using System;
 using System.Collections.Generic;
-using System.Linq;
-using System.Text;
+using System.IO;
 using System.Threading.Tasks;
 using JapaneseConverter;
 using Text_to_Image.Models;
@@ -25,33 +24,24 @@ namespace Text_to_Image.Services
                 {
                     var worksheet = package.Workbook.Worksheets[0];
 
-                    // Xóa hoàn toàn mọi dữ liệu trong worksheet
                     if (worksheet.Dimension != null)
                     {
-                        // Lấy kích thước của worksheet
                         int lastRow = worksheet.Dimension.End.Row;
                         int lastColumn = worksheet.Dimension.End.Column;
 
-                        // Xóa toàn bộ nội dung, bao gồm cả tiêu đề
                         worksheet.Cells[1, 1, lastRow, lastColumn].Clear();
-
-                        // Xóa cả định dạng, công thức, và comment
                         worksheet.Cells[1, 1, lastRow, lastColumn].Style.Font.Bold = false;
                         worksheet.Cells[1, 1, lastRow, lastColumn].Style.Fill.PatternType = OfficeOpenXml.Style.ExcelFillStyle.None;
                         worksheet.Cells[1, 1, lastRow, lastColumn].Style.Border.BorderAround(OfficeOpenXml.Style.ExcelBorderStyle.None);
 
-                        // Xóa các merged cells
                         if (worksheet.MergedCells.Count > 0)
                         {
-                            // Cần tạo một danh sách các địa chỉ để xóa sau
-                            // Vì không thể xóa trực tiếp trong khi đang duyệt qua collection
                             var mergedAddresses = new List<string>();
                             foreach (string mergedCell in worksheet.MergedCells)
                             {
                                 mergedAddresses.Add(mergedCell);
                             }
 
-                            // Xóa từng merged cell
                             foreach (string address in mergedAddresses)
                             {
                                 worksheet.Cells[address].Merge = false;
@@ -60,9 +50,7 @@ namespace Text_to_Image.Services
                             Console.WriteLine($"Removed {mergedAddresses.Count} merged cell regions.");
                         }
 
-                        // Xóa conditional formatting nếu có
                         worksheet.ConditionalFormatting.RemoveAll();
-
                         Console.WriteLine($"Cleaned {lastRow} rows and {lastColumn} columns completely.");
                     }
                     else
@@ -78,23 +66,50 @@ namespace Text_to_Image.Services
             catch (Exception ex)
             {
                 Console.WriteLine($"Error cleaning worksheet: {ex.Message}");
-                throw; // Ném lại ngoại lệ để xử lý ở mức cao hơn
+                throw;
             }
         }
 
-        public static void ProcessExcelFile(ProcessingOptions options)
+        public static async Task ProcessExcelFile(ProcessingOptions options)
         {
             try
             {
-                Console.WriteLine("Processing Excel file data...");
+                Console.WriteLine("Processing Excel file with database integration...");
 
+                string dateToUse = string.IsNullOrWhiteSpace(options.CustomDate) ?
+                    DateTime.Now.ToString("dd-MM-yyyy") : options.CustomDate;
+
+                Console.WriteLine($"Using date: {dateToUse}");
+
+                // Check database for existing audio files
+                int existingAudioCount = 0;
+                try
+                {
+                    using var dbService = new DatabaseService();
+                    string fileType = DetermineFileType(options.FileName);
+                    string audioFileType = DetermineAudioFileType(fileType);
+
+                    var existingSummary = await dbService.GetExistingDataSummary(dateToUse, fileType, audioFileType);
+                    existingAudioCount = existingSummary.AudioFileCount;
+
+                    Console.WriteLine("Database Check Results:");
+                    Console.WriteLine($"  Existing vocabularies: {existingSummary.VocabularyCount}");
+                    Console.WriteLine($"  Existing audio files: {existingSummary.AudioFileCount}");
+                    Console.WriteLine($"  Next audio number starts from: {existingSummary.NextAudioNumber}");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Warning: Database check failed: {ex.Message}");
+                    Console.WriteLine("Will proceed with audio numbering from 1");
+                    existingAudioCount = 0;
+                }
+
+                // Process Excel with correct audio numbering
                 ExcelPackage.LicenseContext = LicenseContext.NonCommercial;
                 using (var package = new ExcelPackage(new FileInfo(options.SelectedFile)))
                 {
                     var worksheet = package.Workbook.Worksheets[0];
                     int rowCount = worksheet.Dimension != null ? worksheet.Dimension.End.Row : 0;
-                    string dateToUse = string.IsNullOrWhiteSpace(options.CustomDate) ? DateTime.Now.ToString("dd-MM-yyyy") : options.CustomDate;
-                    Console.WriteLine($"Using date: {dateToUse}");
 
                     if (rowCount == 0)
                     {
@@ -102,150 +117,52 @@ namespace Text_to_Image.Services
                         return;
                     }
 
-                    Console.WriteLine($"\nExcel file has {rowCount} rows.");
+                    Console.WriteLine($"Excel file has {rowCount} rows.");
                     Console.WriteLine("Starting conversion...");
 
-                    // Xử lý chuyển đổi text và tạo công thức âm thanh
                     for (int row = 1; row <= rowCount; row++)
                     {
-                        // Xử lý chuyển đổi text nếu được yêu cầu (BỎ QUA ENGLISH)
+                        // Text conversion (skip for English files)
                         if (!string.IsNullOrWhiteSpace(options.ColumnInput) &&
                             options.ColumnInput.Length >= 1 &&
                             !options.FileName.Contains("english"))
                         {
                             int inputColumn = options.ColumnInput[0] - 'A' + 1;
-
                             string inputText = worksheet.Cells[row, inputColumn].Text;
+
                             if (!string.IsNullOrEmpty(inputText))
                             {
                                 string convertedText = TextConverter.ConvertToImgTags(inputText);
-
-                                // Lưu vào cột G cố định cho JP/ZH/TuVung
-                                int outputColumn = 7; // Cột G
+                                int outputColumn = 7; // Column G
                                 worksheet.Cells[row, outputColumn].Value = convertedText;
                             }
                         }
 
-                        // Xử lý công thức âm thanh nếu được yêu cầu
+                        // Sound formulas with correct numbering based on database
                         if (!string.IsNullOrWhiteSpace(options.SoundColumns))
                         {
-                            if (options.FileName.Contains("tuvung") && options.SoundColumns.Length == 2)
-                            {
-                                // TuVung: Logic chẵn lẻ - Lẻ = EN (E), Chẵn = VI (F)
-                                int soundCol1 = 5; // Cột E - EN (lẻ)
-                                int soundCol2 = 6; // Cột F - VI (chẵn)
-
-                                worksheet.Cells[row, soundCol1].Value =
-                                    $"[sound:EN-{dateToUse}_{(row * 2 - 1):00}.mp3]";
-                                worksheet.Cells[row, soundCol2].Value =
-                                    $"[sound:VI-{dateToUse}_{(row * 2):00}.mp3]";
-                            }
-                            else if (options.FileName.Contains("japanese") && options.SoundColumns.Length == 2)
-                            {
-                                // Japanese: Logic chẵn lẻ - Lẻ = EN (E), Chẵn = JP (F)
-                                int soundCol1 = 5; // Cột E - EN (lẻ)
-                                int soundCol2 = 6; // Cột F - JP (chẵn)
-
-                                worksheet.Cells[row, soundCol1].Value =
-                                    $"[sound:EN-{dateToUse}_{(row * 2 - 1):00}.mp3]";
-                                worksheet.Cells[row, soundCol2].Value =
-                                    $"[sound:JP-{dateToUse}_{(row * 2):00}.mp3]";
-                            }
-                            else if (options.FileName.Contains("chinese") && options.SoundColumns.Length == 2)
-                            {
-                                // Chinese: Logic chẵn lẻ - Lẻ = EN (E), Chẵn = ZH (F)
-                                int soundCol1 = 5; // Cột E - EN (lẻ)
-                                int soundCol2 = 6; // Cột F - ZH (chẵn)
-
-                                worksheet.Cells[row, soundCol1].Value =
-                                    $"[sound:EN-{dateToUse}_{(row * 2 - 1):00}.mp3]";
-                                worksheet.Cells[row, soundCol2].Value =
-                                    $"[sound:ZH-{dateToUse}_{(row * 2):00}.mp3]";
-                            }
-                            else if (options.FileName.Contains("english") && options.SoundColumns.Length == 2)
-                            {
-                                // English: Logic gốc - Lẻ/chẵn
-                                int soundCol1 = options.SoundColumns[0] - 'A' + 1;
-                                int soundCol2 = options.SoundColumns[1] - 'A' + 1;
-
-                                worksheet.Cells[row, soundCol1].Value =
-                                    $"[sound:EN-{dateToUse}_{(row * 2 - 1):00}.mp3]";
-                                worksheet.Cells[row, soundCol2].Value =
-                                    $"[sound:EN-{dateToUse}_{(row * 2):00}.mp3]";
-                            }
-                            else if (options.SoundColumns.Length == 1)
-                            {
-                                // Logic 1 cột (giữ nguyên)
-                                int soundCol = options.SoundColumns[0] - 'A' + 1;
-                                string prefix = options.FileName.Contains("english") ? "EN" :
-                                              options.FileName.Contains("japanese") ? "JP" :
-                                              options.FileName.Contains("chinese") ? "ZH" : "";
-
-                                if (!string.IsNullOrEmpty(prefix))
-                                {
-                                    worksheet.Cells[row, soundCol].Value =
-                                        $"[sound:{prefix}-{dateToUse}_{row:00}.mp3]";
-                                }
-                            }
+                            ProcessSoundFormulas(worksheet, row, options, dateToUse, existingAudioCount);
                         }
 
-                        // Xử lý định dạng Kanji nếu được yêu cầu (BỎ QUA ENGLISH)
+                        // Kanji processing (skip for English files)
                         if (!string.IsNullOrWhiteSpace(options.KanjiColumn) &&
                             options.KanjiColumn.Length >= 1 &&
                             !options.FileName.Contains("english") &&
                             (options.FileName.Contains("tuvung") ||
                              options.FileName.Contains("japanese") ||
-                             options.FileName.Contains("JP") ||
-                             options.FileName.Contains("chinese") ||
-                             options.FileName.Contains("ZH")))
+                             options.FileName.Contains("chinese")))
                         {
-                            int sourceCol = options.KanjiColumn[0] - 'A' + 1;
-
-                            // Xác định cột đích - cần thêm tham số kanjiOutputColumn vào method
-                            int outputCol = sourceCol; // Mặc định lưu vào cột nguồn
-                            if (!string.IsNullOrWhiteSpace(options.KanjiOutputColumn) && options.KanjiOutputColumn.Length >= 1)
-                            {
-                                outputCol = options.KanjiOutputColumn[0] - 'A' + 1;
-                            }
-
-                            string cellValue = worksheet.Cells[row, sourceCol].Text;
-                            if (!string.IsNullOrEmpty(cellValue))
-                            {
-                                string formattedText = KanjiHelper.FormatKanjiWithBrackets(cellValue);
-                                worksheet.Cells[row, outputCol].Value = formattedText;
-                            }
+                            ProcessKanjiFormatting(worksheet, row, options);
                         }
                     }
 
                     try
                     {
                         package.Save();
-                        Console.WriteLine($"\nCompleted! Processed {rowCount} rows.");
+                        Console.WriteLine($"Completed! Processed {rowCount} rows.");
+                        ShowProcessingSummary(options);
 
-                        // Hiển thị thông tin về các tác vụ đã thực hiện
-                        if (!string.IsNullOrWhiteSpace(options.ColumnInput) && !options.FileName.Contains("english"))
-                        {
-                            Console.WriteLine($"- <img>: done | {options.ColumnInput[0]} -> G");
-                        }
-                        if (!string.IsNullOrWhiteSpace(options.SoundColumns))
-                        {
-                            if ((options.FileName.Contains("tuvung") ||
-                                 options.FileName.Contains("japanese") ||
-                                 options.FileName.Contains("chinese")) &&
-                                options.SoundColumns.Length == 2)
-                            {
-                                Console.WriteLine($"- [sound]: done | E (odd-EN) & F (even-native)");
-                            }
-                            else
-                            {
-                                Console.WriteLine($"- [sound]: done | {options.SoundColumns}");
-                            }
-                        }
-                        if (!string.IsNullOrWhiteSpace(options.KanjiColumn))
-                            Console.WriteLine($"- kanji: done | {options.KanjiColumn}");
-
-                        // Hỏi người dùng có muốn mở file đã xử lý không
-                        Console.Write("\nOpen Processed Excel File? (Y/N): ");
+                        Console.Write("Open Processed Excel File? (Y/N): ");
                         string openAnswer = Console.ReadLine().Trim().ToUpper();
                         if (openAnswer == "Y")
                         {
@@ -261,7 +178,126 @@ namespace Text_to_Image.Services
             catch (Exception ex)
             {
                 Console.WriteLine($"Error processing file: {ex.Message}");
+                throw;
             }
+        }
+
+        private static void ProcessSoundFormulas(ExcelWorksheet worksheet, int row, ProcessingOptions options,
+            string dateToUse, int existingAudioCount)
+        {
+            // Calculate correct audio numbers based on existing files in database
+            int currentAudioOdd = existingAudioCount + (row * 2 - 1);
+            int currentAudioEven = existingAudioCount + (row * 2);
+
+            if (options.FileName.Contains("tuvung") && options.SoundColumns.Length == 2)
+            {
+                worksheet.Cells[row, 5].Value = $"[sound:EN-{dateToUse}_{currentAudioOdd:00}.mp3]";
+                worksheet.Cells[row, 6].Value = $"[sound:VI-{dateToUse}_{currentAudioEven:00}.mp3]";
+            }
+            else if (options.FileName.Contains("japanese") && options.SoundColumns.Length == 2)
+            {
+                worksheet.Cells[row, 5].Value = $"[sound:EN-{dateToUse}_{currentAudioOdd:00}.mp3]";
+                worksheet.Cells[row, 6].Value = $"[sound:JP-{dateToUse}_{currentAudioEven:00}.mp3]";
+            }
+            else if (options.FileName.Contains("chinese") && options.SoundColumns.Length == 2)
+            {
+                worksheet.Cells[row, 5].Value = $"[sound:EN-{dateToUse}_{currentAudioOdd:00}.mp3]";
+                worksheet.Cells[row, 6].Value = $"[sound:ZH-{dateToUse}_{currentAudioEven:00}.mp3]";
+            }
+            else if (options.FileName.Contains("english") && options.SoundColumns.Length == 2)
+            {
+                int soundCol1 = options.SoundColumns[0] - 'A' + 1;
+                int soundCol2 = options.SoundColumns[1] - 'A' + 1;
+
+                worksheet.Cells[row, soundCol1].Value = $"[sound:EN-{dateToUse}_{currentAudioOdd:00}.mp3]";
+                worksheet.Cells[row, soundCol2].Value = $"[sound:EN-{dateToUse}_{currentAudioEven:00}.mp3]";
+            }
+            else if (options.SoundColumns.Length == 1)
+            {
+                int soundCol = options.SoundColumns[0] - 'A' + 1;
+                string prefix = DetermineLanguagePrefix(options.FileName);
+
+                if (!string.IsNullOrEmpty(prefix))
+                {
+                    int audioNumber = existingAudioCount + row;
+                    worksheet.Cells[row, soundCol].Value = $"[sound:{prefix}-{dateToUse}_{audioNumber:00}.mp3]";
+                }
+            }
+        }
+
+        private static void ProcessKanjiFormatting(ExcelWorksheet worksheet, int row, ProcessingOptions options)
+        {
+            int sourceCol = options.KanjiColumn[0] - 'A' + 1;
+            int outputCol = sourceCol;
+
+            if (!string.IsNullOrWhiteSpace(options.KanjiOutputColumn) && options.KanjiOutputColumn.Length >= 1)
+            {
+                outputCol = options.KanjiOutputColumn[0] - 'A' + 1;
+            }
+
+            string cellValue = worksheet.Cells[row, sourceCol].Text;
+            if (!string.IsNullOrEmpty(cellValue))
+            {
+                string formattedText = KanjiHelper.FormatKanjiWithBrackets(cellValue);
+                worksheet.Cells[row, outputCol].Value = formattedText;
+            }
+        }
+
+        private static void ShowProcessingSummary(ProcessingOptions options)
+        {
+            if (!string.IsNullOrWhiteSpace(options.ColumnInput) && !options.FileName.Contains("english"))
+            {
+                Console.WriteLine($"- <img>: done | {options.ColumnInput[0]} -> G");
+            }
+
+            if (!string.IsNullOrWhiteSpace(options.SoundColumns))
+            {
+                if ((options.FileName.Contains("tuvung") ||
+                     options.FileName.Contains("japanese") ||
+                     options.FileName.Contains("chinese")) &&
+                    options.SoundColumns.Length == 2)
+                {
+                    Console.WriteLine("- [sound]: done | E (odd-EN) & F (even-native)");
+                }
+                else
+                {
+                    Console.WriteLine($"- [sound]: done | {options.SoundColumns}");
+                }
+            }
+
+            if (!string.IsNullOrWhiteSpace(options.KanjiColumn))
+                Console.WriteLine($"- kanji: done | {options.KanjiColumn}");
+        }
+
+        private static string DetermineFileType(string fileName)
+        {
+            fileName = fileName.ToLower();
+            if (fileName.Contains("english")) return "English";
+            if (fileName.Contains("japanese")) return "Japanese";
+            if (fileName.Contains("chinese")) return "Chinese";
+            if (fileName.Contains("tuvung")) return "TuVung";
+            return "Unknown";
+        }
+
+        private static string DetermineAudioFileType(string fileType)
+        {
+            return fileType.ToLower() switch
+            {
+                "english" => "VI-EN",
+                "japanese" => "JP-EN",
+                "chinese" => "ZH-EN",
+                "tuvung" => "TUVUNG",
+                _ => "VI-EN"
+            };
+        }
+
+        private static string DetermineLanguagePrefix(string fileName)
+        {
+            fileName = fileName.ToLower();
+            if (fileName.Contains("english")) return "EN";
+            if (fileName.Contains("japanese")) return "JP";
+            if (fileName.Contains("chinese")) return "ZH";
+            return "";
         }
 
         public static System.Diagnostics.Process OpenExcelFile(string filePath)
@@ -291,7 +327,7 @@ namespace Text_to_Image.Services
                 Console.WriteLine($"{i + 1}. {Path.GetFileName(excelFiles[i])}");
             }
 
-            Console.Write("\nPlease enter the file number to process (press Enter to exit). ");
+            Console.Write("Please enter the file number to process (press Enter to exit). ");
             string fileInput = Console.ReadLine();
 
             if (string.IsNullOrWhiteSpace(fileInput))
@@ -310,19 +346,16 @@ namespace Text_to_Image.Services
 
         public static bool OpenAndWaitForExcelFile(ProcessingOptions options)
         {
-            // Xử lý dữ liệu sơ bộ - làm sạch worksheet
-            ExcelProcessor.CleanWorksheet(options.SelectedFile);
+            CleanWorksheet(options.SelectedFile);
 
-            // Mở file Excel cho người dùng xem
-            Console.WriteLine("\nOpening cleaned Excel file...");
-            var excelProcess = ExcelProcessor.OpenExcelFile(options.SelectedFile);
+            Console.WriteLine("Opening cleaned Excel file...");
+            var excelProcess = OpenExcelFile(options.SelectedFile);
 
             if (excelProcess != null)
             {
                 Console.WriteLine("File opened successfully...");
                 Console.WriteLine("Waiting for you to close Excel file...");
 
-                // Chờ cho đến khi người dùng đóng file Excel
                 excelProcess.WaitForExit();
                 Console.WriteLine("Detected Excel file has been closed.");
                 return true;
@@ -331,21 +364,19 @@ namespace Text_to_Image.Services
             return false;
         }
 
-        public static void ExecuteTasks(ProcessingOptions options)
+        public static async Task ExecuteTasks(ProcessingOptions options)
         {
-            // Audio file renaming
             if (options.RenameAudioFiles)
             {
                 AudioFileManager.RenameAudioFiles(options.AudioFolderPath, options.SelectedDay,
                     options.SelectedMonth, options.SelectedYear, options.FileName);
             }
 
-            // Excel processing
             if (!string.IsNullOrWhiteSpace(options.ColumnInput) ||
                 !string.IsNullOrWhiteSpace(options.SoundColumns) ||
                 !string.IsNullOrWhiteSpace(options.KanjiColumn))
             {
-                ExcelProcessor.ProcessExcelFile(options);
+                await ProcessExcelFile(options);
             }
             else
             {
@@ -353,39 +384,19 @@ namespace Text_to_Image.Services
             }
         }
 
-        public static bool AskToContinue()
-        {
-            Console.Write("\nDo it again? (Y/N): ");
-            string answer = Console.ReadLine()?.Trim().ToUpper();
-
-            if (answer != "Y")
-            {
-                Console.WriteLine("The program has ended. Thank!");
-                return false;
-            }
-            else
-            {
-                Console.WriteLine("\n========================================");
-                Console.WriteLine("Starting new process...");
-                Console.WriteLine("========================================\n");
-                return true;
-            }
-        }
         public static async Task ExecuteTasksWithDatabase(ProcessingOptions options)
         {
-            // Audio file renaming
             if (options.RenameAudioFiles)
             {
                 AudioFileManager.RenameAudioFiles(options.AudioFolderPath, options.SelectedDay,
                     options.SelectedMonth, options.SelectedYear, options.FileName);
             }
 
-            // Excel processing
             if (!string.IsNullOrWhiteSpace(options.ColumnInput) ||
                 !string.IsNullOrWhiteSpace(options.SoundColumns) ||
                 !string.IsNullOrWhiteSpace(options.KanjiColumn))
             {
-                ExcelProcessor.ProcessExcelFile(options);
+                await ProcessExcelFile(options);
             }
             else
             {
@@ -393,37 +404,34 @@ namespace Text_to_Image.Services
                 return;
             }
 
-            // Save to database ONLY if user chose to
             if (options.SaveToDatabase)
             {
                 try
                 {
-                    Console.WriteLine("\n" + new string('=', 50));
+                    Console.WriteLine("==================================================");
 
                     using var dbService = new DatabaseService();
                     var session = await dbService.SaveExcelDataToDatabaseAsync(options);
 
-                    Console.WriteLine($"\n📊 Database Summary:");
-                    Console.WriteLine($"✅ Session ID: {session.SessionId}");
-                    Console.WriteLine($"✅ Processed: {session.ProcessedRows} vocabulary entries");
-                    Console.WriteLine($"✅ Audio records: {session.AudioFilesCreated}");
-                    Console.WriteLine($"✅ File type: {session.FileType}");
-                    Console.WriteLine($"✅ Date: {session.DateUsed}");
-                    Console.WriteLine(new string('=', 50));
+                    Console.WriteLine("Database Summary:");
+                    Console.WriteLine($"Session ID: {session.SessionId}");
+                    Console.WriteLine($"Processed: {session.ProcessedRows} vocabulary entries");
+                    Console.WriteLine($"Audio records: {session.AudioFilesCreated}");
+                    Console.WriteLine($"File type: {session.FileType}");
+                    Console.WriteLine($"Date: {session.DateUsed}");
+                    Console.WriteLine("==================================================");
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"\n❌ Database save failed: {ex.Message}");
+                    Console.WriteLine($"Database save failed: {ex.Message}");
                     Console.WriteLine("Excel processing completed but data not saved to database.");
                     Console.WriteLine("Please check your SQL Server connection.");
-
-                    // Log chi tiết lỗi để debug
                     Console.WriteLine($"Error details: {ex.InnerException?.Message}");
                 }
             }
             else
             {
-                Console.WriteLine("\n💾 Database save skipped (user choice).");
+                Console.WriteLine("Database save skipped (user choice).");
                 Console.WriteLine("Excel processing completed successfully without database save.");
             }
         }
