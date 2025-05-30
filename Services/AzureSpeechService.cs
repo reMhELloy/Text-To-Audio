@@ -114,19 +114,21 @@ namespace Text_to_Image.Services
 
             // Tạo SSML với silent đầu/cuối và tốc độ phù hợp
             string ssml = $@"<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='en-US'>
-<voice name='{voiceName}'>
-<break time='200ms'/>
-<prosody rate='{rate}' {style}>
-{escapedText}
-</prosody>
-<break time='300ms'/>
-</voice>
-</speak>";
+                <voice name='{voiceName}'>
+                <break time='200ms'/>
+                <prosody rate='{rate}' {style}>
+                {escapedText}
+                </prosody>
+                <break time='300ms'/>
+                </voice>
+                </speak>";
 
             return ssml;
         }
 
-        // Xử lý tạo âm thanh từ Excel
+        // Thay thế hoàn toàn method ProcessExcelForAudio trong AzureSpeechService
+        // Thay thế hoàn toàn method ProcessExcelForAudio trong AzureSpeechService
+
         public async Task ProcessExcelForAudio(ProcessingOptions options)
         {
             try
@@ -142,8 +144,8 @@ namespace Text_to_Image.Services
                     return;
                 }
 
-                // Tạo danh sách các audio files cần tạo
-                var audioFiles = AudioFileManager.GenerateAudioFileNames(options, rowCount);
+                // Tạo danh sách các audio files cần tạo - CHỈ CHO ROWS CÓ SOUND FORMULAS
+                var audioFiles = GenerateAudioFileNamesFromFormulas(worksheet, options, rowCount);
 
                 if (audioFiles.Count == 0)
                 {
@@ -170,22 +172,222 @@ namespace Text_to_Image.Services
                     tasks.Add(ProcessAudioFileTask(audioFile, semaphore));
                 }
 
-                // Đợi TẤT CẢ tasks hoàn thành trước khi tiếp tục
                 await Task.WhenAll(tasks);
-
-                // Đảm bảo semaphore đã được release hết
                 semaphore.Dispose();
 
                 int successCount = audioFiles.Count(af => !string.IsNullOrEmpty(af.SourceText));
                 Console.WriteLine($"Completed! Created {successCount} audio files with learner-friendly settings.");
 
-                // Thêm delay nhỏ để đảm bảo tất cả file operations hoàn thành
                 await Task.Delay(500);
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"Error processing Excel for audio: {ex.Message}");
             }
+        }
+
+        // THÊM CÁC METHODS MỚI VÀO AzureSpeechService:
+
+        private bool CheckRowHasAudioFormulas(ExcelWorksheet worksheet, int row, ProcessingOptions options)
+        {
+            if (string.IsNullOrWhiteSpace(options.SoundColumns)) return false;
+
+            if ((options.FileName.Contains("tuvung") ||
+                 options.FileName.Contains("japanese") ||
+                 options.FileName.Contains("chinese")) && options.SoundColumns.Length == 2)
+            {
+                string col1Value = worksheet.Cells[row, 5].Text?.Trim();
+                string col2Value = worksheet.Cells[row, 6].Text?.Trim();
+
+                return !string.IsNullOrEmpty(col1Value) && !string.IsNullOrEmpty(col2Value) &&
+                       col1Value.Contains("[sound:") && col2Value.Contains("[sound:");
+            }
+            else if (options.FileName.Contains("english") && options.SoundColumns.Length == 2)
+            {
+                int soundCol1 = options.SoundColumns[0] - 'A' + 1;
+                int soundCol2 = options.SoundColumns[1] - 'A' + 1;
+
+                string col1Value = worksheet.Cells[row, soundCol1].Text?.Trim();
+                string col2Value = worksheet.Cells[row, soundCol2].Text?.Trim();
+
+                return !string.IsNullOrEmpty(col1Value) && !string.IsNullOrEmpty(col2Value) &&
+                       col1Value.Contains("[sound:") && col2Value.Contains("[sound:");
+            }
+            else if (options.SoundColumns.Length == 1)
+            {
+                int soundCol = options.SoundColumns[0] - 'A' + 1;
+                string colValue = worksheet.Cells[row, soundCol].Text?.Trim();
+
+                return !string.IsNullOrEmpty(colValue) && colValue.Contains("[sound:");
+            }
+
+            return false;
+        }
+
+        private List<AudioFileInfo> GenerateAudioFileNamesFromFormulas(ExcelWorksheet worksheet, ProcessingOptions options, int rowCount)
+        {
+            var audioFiles = new List<AudioFileInfo>();
+
+            for (int row = 1; row <= rowCount; row++)
+            {
+                if (!CheckRowHasAudioFormulas(worksheet, row, options))
+                {
+                    Console.WriteLine($"Row {row}: Skipping audio creation (no sound formulas - duplicate entry)");
+                    continue;
+                }
+
+                var rowAudioFiles = ExtractAudioFilesFromRow(worksheet, row, options);
+                audioFiles.AddRange(rowAudioFiles);
+            }
+
+            return audioFiles;
+        }
+
+        private List<AudioFileInfo> ExtractAudioFilesFromRow(ExcelWorksheet worksheet, int row, ProcessingOptions options)
+        {
+            var audioFiles = new List<AudioFileInfo>();
+
+            if ((options.FileName.Contains("tuvung") ||
+                 options.FileName.Contains("japanese") ||
+                 options.FileName.Contains("chinese")) && options.SoundColumns.Length == 2)
+            {
+                string col1Formula = worksheet.Cells[row, 5].Text?.Trim(); // Column E
+                string col2Formula = worksheet.Cells[row, 6].Text?.Trim(); // Column F
+
+                // CHỈ TÃO AUDIO CHO SOUND FORMULAS CÓ SẴN
+                if (!string.IsNullOrEmpty(col1Formula) && col1Formula.Contains("[sound:"))
+                {
+                    string fileName = ExtractFileNameFromFormula(col1Formula);
+                    // Xác định language và voice dựa trên filename prefix
+                    string lang = ExtractLanguageFromFileName(fileName);
+                    string sourceCol = GetSourceColumnForLanguage(lang, options);
+
+                    audioFiles.Add(new AudioFileInfo
+                    {
+                        RowIndex = row,
+                        SourceColumn = sourceCol,
+                        FileName = fileName,
+                        VoiceName = GetVoiceNameForLanguage(lang)
+                    });
+                }
+
+                if (!string.IsNullOrEmpty(col2Formula) && col2Formula.Contains("[sound:"))
+                {
+                    string fileName = ExtractFileNameFromFormula(col2Formula);
+                    // Xác định language và voice dựa trên filename prefix
+                    string lang = ExtractLanguageFromFileName(fileName);
+                    string sourceCol = GetSourceColumnForLanguage(lang, options);
+
+                    audioFiles.Add(new AudioFileInfo
+                    {
+                        RowIndex = row,
+                        SourceColumn = sourceCol,
+                        FileName = fileName,
+                        VoiceName = GetVoiceNameForLanguage(lang)
+                    });
+                }
+            }
+            else if (options.FileName.Contains("english") && options.SoundColumns.Length == 2)
+            {
+                int soundCol1 = options.SoundColumns[0] - 'A' + 1;
+                int soundCol2 = options.SoundColumns[1] - 'A' + 1;
+
+                string col1Formula = worksheet.Cells[row, soundCol1].Text?.Trim();
+                string col2Formula = worksheet.Cells[row, soundCol2].Text?.Trim();
+
+                if (!string.IsNullOrEmpty(col1Formula) && col1Formula.Contains("[sound:"))
+                {
+                    string fileName = ExtractFileNameFromFormula(col1Formula);
+                    audioFiles.Add(new AudioFileInfo
+                    {
+                        RowIndex = row,
+                        SourceColumn = "B", // English column
+                        FileName = fileName,
+                        VoiceName = GetVoiceNameForLanguage("EN")
+                    });
+                }
+
+                if (!string.IsNullOrEmpty(col2Formula) && col2Formula.Contains("[sound:"))
+                {
+                    string fileName = ExtractFileNameFromFormula(col2Formula);
+                    audioFiles.Add(new AudioFileInfo
+                    {
+                        RowIndex = row,
+                        SourceColumn = "B", // English column
+                        FileName = fileName,
+                        VoiceName = GetVoiceNameForLanguage("EN")
+                    });
+                }
+            }
+
+            return audioFiles;
+        }
+
+        // THÊM HELPER METHODS MỚI:
+        private string ExtractLanguageFromFileName(string fileName)
+        {
+            // Extract language from filename: "JP-29-05-2025_02.mp3" -> "JP"
+            if (fileName.Contains("-"))
+            {
+                return fileName.Split('-')[0];
+            }
+            return "EN"; // Default
+        }
+
+        private string GetSourceColumnForLanguage(string language, ProcessingOptions options)
+        {
+            if (options.FileName.Contains("tuvung"))
+            {
+                return language switch
+                {
+                    "EN" => "B", // English text
+                    "VI" => "A", // Vietnamese text
+                    _ => "A"
+                };
+            }
+            else if (options.FileName.Contains("japanese"))
+            {
+                // JAPANESE: Cả 2 files JP đều từ các column khác nhau
+                return language switch
+                {
+                    "JP" => "A", // Nếu là JP file đầu tiên (odd) → đọc English text
+                    _ => "C"     // Nếu là JP file thứ hai (even) → đọc Japanese text
+                };
+            }
+            else if (options.FileName.Contains("chinese"))
+            {
+                // CHINESE: Cả 2 files ZH đều từ các column khác nhau
+                return language switch
+                {
+                    "ZH" => "A", // Nếu là ZH file đầu tiên (odd) → đọc English text
+                    _ => "C"     // Nếu là ZH file thứ hai (even) → đọc Chinese text
+                };
+            }
+
+            return "A"; // Default
+        }
+
+        private string GetVoiceNameForLanguage(string language)
+        {
+            return language switch
+            {
+                "EN" => "en-US-JennyNeural",
+                "VI" => "vi-VN-HoaiMyNeural",
+                "JP" => "ja-JP-NanamiNeural",
+                "ZH" => "zh-CN-XiaoxiaoNeural",
+                _ => "en-US-JennyNeural"
+            };
+        }
+
+        private string ExtractFileNameFromFormula(string formula)
+        {
+            int start = formula.IndexOf("[sound:") + 7;
+            int end = formula.IndexOf("]", start);
+            if (start > 6 && end > start)
+            {
+                return formula.Substring(start, end - start);
+            }
+            return "";
         }
 
         private async Task ProcessAudioFileTask(AudioFileInfo audioFile, SemaphoreSlim semaphore)

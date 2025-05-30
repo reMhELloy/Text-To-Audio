@@ -3,9 +3,11 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Threading.Tasks;
+using System.Linq;
 using JapaneseConverter;
 using Text_to_Image.Models;
 using Text_to_Image.Data;
+using Text_to_Image.Data.Models;
 
 namespace Text_to_Image.Services
 {
@@ -81,8 +83,10 @@ namespace Text_to_Image.Services
 
                 Console.WriteLine($"Using date: {dateToUse}");
 
-                // Check database for existing audio files
+                // Get existing data for duplicate checking
+                List<Vocabulary> existingVocabs = new List<Vocabulary>();
                 int existingAudioCount = 0;
+
                 try
                 {
                     using var dbService = new DatabaseService();
@@ -92,8 +96,10 @@ namespace Text_to_Image.Services
                     var existingSummary = await dbService.GetExistingDataSummary(dateToUse, fileType, audioFileType);
                     existingAudioCount = existingSummary.AudioFileCount;
 
+                    existingVocabs = await dbService.GetExistingVocabulariesForDateAsync(dateToUse, fileType);
+
                     Console.WriteLine("Database Check Results:");
-                    Console.WriteLine($"  Existing vocabularies: {existingSummary.VocabularyCount}");
+                    Console.WriteLine($"  Existing vocabularies (SAME DAY): {existingSummary.VocabularyCount}");
                     Console.WriteLine($"  Existing audio files: {existingSummary.AudioFileCount}");
                     Console.WriteLine($"  Next audio number starts from: {existingSummary.NextAudioNumber}");
                 }
@@ -104,7 +110,7 @@ namespace Text_to_Image.Services
                     existingAudioCount = 0;
                 }
 
-                // Process Excel with correct audio numbering
+                // Process Excel
                 ExcelPackage.LicenseContext = LicenseContext.NonCommercial;
                 using (var package = new ExcelPackage(new FileInfo(options.SelectedFile)))
                 {
@@ -118,11 +124,17 @@ namespace Text_to_Image.Services
                     }
 
                     Console.WriteLine($"Excel file has {rowCount} rows.");
-                    Console.WriteLine("Starting conversion...");
+                    Console.WriteLine("Starting duplicate checking: SAME DAY database + CURRENT SESSION...");
+
+                    int currentAudioNumber = existingAudioCount + 1;
+                    var processedRows = new List<Vocabulary>();
 
                     for (int row = 1; row <= rowCount; row++)
                     {
-                        // Text conversion (skip for English files)
+                        // DUPLICATE CHECK: Database same day + Current session
+                        bool isDuplicate = CheckRowForDuplicate(worksheet, row, existingVocabs, processedRows, options);
+
+                        // Text conversion
                         if (!string.IsNullOrWhiteSpace(options.ColumnInput) &&
                             options.ColumnInput.Length >= 1 &&
                             !options.FileName.Contains("english"))
@@ -133,18 +145,32 @@ namespace Text_to_Image.Services
                             if (!string.IsNullOrEmpty(inputText))
                             {
                                 string convertedText = TextConverter.ConvertToImgTags(inputText);
-                                int outputColumn = 7; // Column G
+                                int outputColumn = 7;
                                 worksheet.Cells[row, outputColumn].Value = convertedText;
                             }
                         }
 
-                        // Sound formulas with correct numbering based on database
+                        // Sound formulas
                         if (!string.IsNullOrWhiteSpace(options.SoundColumns))
                         {
-                            ProcessSoundFormulas(worksheet, row, options, dateToUse, existingAudioCount);
+                            if (isDuplicate)
+                            {
+                                ClearSoundFormulas(worksheet, row, options);
+                                Console.WriteLine($"Row {row}: Duplicate - CLEARED formulas");
+                            }
+                            else
+                            {
+                                ProcessSoundFormulas(worksheet, row, options, dateToUse, currentAudioNumber);
+
+                                var currentVocab = CreateVocabularyFromRow(worksheet, row, options);
+                                processedRows.Add(currentVocab);
+
+                                Console.WriteLine($"Row {row}: NEW - Assigned audio {currentAudioNumber} & {currentAudioNumber + 1}");
+                                currentAudioNumber += 2;
+                            }
                         }
 
-                        // Kanji processing (skip for English files)
+                        // Kanji processing
                         if (!string.IsNullOrWhiteSpace(options.KanjiColumn) &&
                             options.KanjiColumn.Length >= 1 &&
                             !options.FileName.Contains("english") &&
@@ -182,46 +208,161 @@ namespace Text_to_Image.Services
             }
         }
 
-        private static void ProcessSoundFormulas(ExcelWorksheet worksheet, int row, ProcessingOptions options,
-            string dateToUse, int existingAudioCount)
+        // FINAL LOGIC: Check duplicate - Database same day + Current session
+        private static bool CheckRowForDuplicate(ExcelWorksheet worksheet, int row,
+            List<Vocabulary> existingVocabs, List<Vocabulary> processedRows, ProcessingOptions options)
         {
-            // Calculate correct audio numbers based on existing files in database
-            int currentAudioOdd = existingAudioCount + (row * 2 - 1);
-            int currentAudioEven = existingAudioCount + (row * 2);
+            var currentVocab = CreateVocabularyFromRow(worksheet, row, options);
+            string currentText = GetPrimaryText(currentVocab);
+
+            Console.WriteLine($"Row {row}: Checking '{currentText}'");
+
+            // CHECK 1: Database same day
+            bool isDuplicateInDatabase = existingVocabs.Any(existing =>
+                SimilarText(existing.EnglishText, currentVocab.EnglishText) ||
+                SimilarText(existing.VietnameseText, currentVocab.VietnameseText) ||
+                SimilarText(existing.JapaneseText, currentVocab.JapaneseText) ||
+                SimilarText(existing.ChineseText, currentVocab.ChineseText)
+            );
+
+            // CHECK 2: Current session
+            bool isDuplicateInCurrentSession = processedRows.Any(processed =>
+                SimilarText(processed.EnglishText, currentVocab.EnglishText) ||
+                SimilarText(processed.VietnameseText, currentVocab.VietnameseText) ||
+                SimilarText(processed.JapaneseText, currentVocab.JapaneseText) ||
+                SimilarText(processed.ChineseText, currentVocab.ChineseText)
+            );
+
+            if (isDuplicateInDatabase)
+            {
+                Console.WriteLine($"Row {row}: DUPLICATE in DATABASE (same day)");
+                return true;
+            }
+            else if (isDuplicateInCurrentSession)
+            {
+                Console.WriteLine($"Row {row}: DUPLICATE in CURRENT SESSION");
+                return true;
+            }
+            else
+            {
+                Console.WriteLine($"Row {row}: NEW ENTRY");
+                return false;
+            }
+        }
+
+        private static void ProcessSoundFormulas(ExcelWorksheet worksheet, int row, ProcessingOptions options,
+            string dateToUse, int currentAudioNumber)
+        {
+            int oddNumber = currentAudioNumber;
+            int evenNumber = currentAudioNumber + 1;
 
             if (options.FileName.Contains("tuvung") && options.SoundColumns.Length == 2)
             {
-                worksheet.Cells[row, 5].Value = $"[sound:EN-{dateToUse}_{currentAudioOdd:00}.mp3]";
-                worksheet.Cells[row, 6].Value = $"[sound:VI-{dateToUse}_{currentAudioEven:00}.mp3]";
+                worksheet.Cells[row, 5].Value = $"[sound:EN-{dateToUse}_{oddNumber:00}.mp3]";
+                worksheet.Cells[row, 6].Value = $"[sound:VI-{dateToUse}_{evenNumber:00}.mp3]";
             }
             else if (options.FileName.Contains("japanese") && options.SoundColumns.Length == 2)
             {
-                worksheet.Cells[row, 5].Value = $"[sound:EN-{dateToUse}_{currentAudioOdd:00}.mp3]";
-                worksheet.Cells[row, 6].Value = $"[sound:JP-{dateToUse}_{currentAudioEven:00}.mp3]";
+                worksheet.Cells[row, 5].Value = $"[sound:JP-{dateToUse}_{oddNumber:00}.mp3]";
+                worksheet.Cells[row, 6].Value = $"[sound:JP-{dateToUse}_{evenNumber:00}.mp3]";
             }
             else if (options.FileName.Contains("chinese") && options.SoundColumns.Length == 2)
             {
-                worksheet.Cells[row, 5].Value = $"[sound:EN-{dateToUse}_{currentAudioOdd:00}.mp3]";
-                worksheet.Cells[row, 6].Value = $"[sound:ZH-{dateToUse}_{currentAudioEven:00}.mp3]";
+                worksheet.Cells[row, 5].Value = $"[sound:ZH-{dateToUse}_{oddNumber:00}.mp3]";
+                worksheet.Cells[row, 6].Value = $"[sound:ZH-{dateToUse}_{evenNumber:00}.mp3]";
             }
             else if (options.FileName.Contains("english") && options.SoundColumns.Length == 2)
             {
                 int soundCol1 = options.SoundColumns[0] - 'A' + 1;
                 int soundCol2 = options.SoundColumns[1] - 'A' + 1;
-
-                worksheet.Cells[row, soundCol1].Value = $"[sound:EN-{dateToUse}_{currentAudioOdd:00}.mp3]";
-                worksheet.Cells[row, soundCol2].Value = $"[sound:EN-{dateToUse}_{currentAudioEven:00}.mp3]";
+                worksheet.Cells[row, soundCol1].Value = $"[sound:EN-{dateToUse}_{oddNumber:00}.mp3]";
+                worksheet.Cells[row, soundCol2].Value = $"[sound:EN-{dateToUse}_{evenNumber:00}.mp3]";
             }
             else if (options.SoundColumns.Length == 1)
             {
                 int soundCol = options.SoundColumns[0] - 'A' + 1;
                 string prefix = DetermineLanguagePrefix(options.FileName);
-
                 if (!string.IsNullOrEmpty(prefix))
                 {
-                    int audioNumber = existingAudioCount + row;
-                    worksheet.Cells[row, soundCol].Value = $"[sound:{prefix}-{dateToUse}_{audioNumber:00}.mp3]";
+                    worksheet.Cells[row, soundCol].Value = $"[sound:{prefix}-{dateToUse}_{oddNumber:00}.mp3]";
                 }
+            }
+        }
+
+        private static Vocabulary CreateVocabularyFromRow(ExcelWorksheet worksheet, int row, ProcessingOptions options)
+        {
+            var vocab = new Vocabulary();
+            string fileType = DetermineFileType(options.FileName);
+
+            switch (fileType.ToLower())
+            {
+                case "english":
+                    vocab.VietnameseText = GetCellValue(worksheet, row, 1);
+                    vocab.EnglishText = GetCellValue(worksheet, row, 2);
+                    break;
+                case "japanese":
+                    vocab.EnglishText = GetCellValue(worksheet, row, 1);
+                    vocab.ReadingText = GetCellValue(worksheet, row, 2);
+                    vocab.JapaneseText = GetCellValue(worksheet, row, 3);
+                    break;
+                case "chinese":
+                    vocab.EnglishText = GetCellValue(worksheet, row, 1);
+                    vocab.ReadingText = GetCellValue(worksheet, row, 2);
+                    vocab.ChineseText = GetCellValue(worksheet, row, 3);
+                    break;
+                case "tuvung":
+                    vocab.VietnameseText = GetCellValue(worksheet, row, 1);
+                    vocab.ReadingText = GetCellValue(worksheet, row, 2);
+                    vocab.JapaneseText = GetCellValue(worksheet, row, 3);
+                    break;
+            }
+
+            return vocab;
+        }
+
+        private static string GetPrimaryText(Vocabulary vocab)
+        {
+            return !string.IsNullOrEmpty(vocab.EnglishText) ? vocab.EnglishText :
+                   !string.IsNullOrEmpty(vocab.VietnameseText) ? vocab.VietnameseText :
+                   !string.IsNullOrEmpty(vocab.JapaneseText) ? vocab.JapaneseText :
+                   vocab.ChineseText ?? "";
+        }
+
+        private static string GetCellValue(ExcelWorksheet worksheet, int row, int column)
+        {
+            var value = worksheet.Cells[row, column].Text?.Trim();
+            return string.IsNullOrEmpty(value) ? "" : value;
+        }
+
+        private static bool SimilarText(string text1, string text2)
+        {
+            if (string.IsNullOrWhiteSpace(text1) || string.IsNullOrWhiteSpace(text2))
+                return false;
+            return text1.Trim().Equals(text2.Trim(), StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static void ClearSoundFormulas(ExcelWorksheet worksheet, int row, ProcessingOptions options)
+        {
+            if (string.IsNullOrWhiteSpace(options.SoundColumns)) return;
+
+            if ((options.FileName.Contains("tuvung") ||
+                 options.FileName.Contains("japanese") ||
+                 options.FileName.Contains("chinese")) && options.SoundColumns.Length == 2)
+            {
+                worksheet.Cells[row, 5].Value = "";
+                worksheet.Cells[row, 6].Value = "";
+            }
+            else if (options.FileName.Contains("english") && options.SoundColumns.Length == 2)
+            {
+                int soundCol1 = options.SoundColumns[0] - 'A' + 1;
+                int soundCol2 = options.SoundColumns[1] - 'A' + 1;
+                worksheet.Cells[row, soundCol1].Value = "";
+                worksheet.Cells[row, soundCol2].Value = "";
+            }
+            else if (options.SoundColumns.Length == 1)
+            {
+                int soundCol = options.SoundColumns[0] - 'A' + 1;
+                worksheet.Cells[row, soundCol].Value = "";
             }
         }
 
