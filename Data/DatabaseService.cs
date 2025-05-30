@@ -204,6 +204,7 @@ namespace Text_to_Image.Data
             return audioFiles;
         }
 
+        // SỬA LẠI DatabaseService.CreateAudioFilesForVocabulary() THEO LOGIC CŨ ĐÚNG
         private List<AudioFile> CreateAudioFilesForVocabulary(Vocabulary vocab, ProcessingOptions options, string dateToUse, int oddNumber, int evenNumber, DateTime targetDate)
         {
             var audioFiles = new List<AudioFile>();
@@ -211,28 +212,39 @@ namespace Text_to_Image.Data
             switch (options.AudioFileType)
             {
                 case "VI-EN":
+                    // File lẻ: Vietnamese voice + Vietnamese text
                     if (!string.IsNullOrWhiteSpace(vocab.VietnameseText))
                         audioFiles.Add(CreateAudioFileRecord(vocab.VocabId, "VI", $"EN-{dateToUse}_{oddNumber:00}.mp3", "vi-VN-HoaiMyNeural", 1.0m, true, targetDate));
+                    // File chẵn: English voice + English text
                     if (!string.IsNullOrWhiteSpace(vocab.EnglishText))
                         audioFiles.Add(CreateAudioFileRecord(vocab.VocabId, "EN", $"EN-{dateToUse}_{evenNumber:00}.mp3", "en-US-JennyNeural", 0.75m, false, targetDate));
                     break;
+
                 case "JP-EN":
+                    // File lẻ: English voice + English text
                     if (!string.IsNullOrWhiteSpace(vocab.EnglishText))
                         audioFiles.Add(CreateAudioFileRecord(vocab.VocabId, "EN", $"JP-{dateToUse}_{oddNumber:00}.mp3", "en-US-JennyNeural", 0.75m, true, targetDate));
+                    // File chẵn: Japanese voice + Japanese text
                     if (!string.IsNullOrWhiteSpace(vocab.JapaneseText))
                         audioFiles.Add(CreateAudioFileRecord(vocab.VocabId, "JP", $"JP-{dateToUse}_{evenNumber:00}.mp3", "ja-JP-NanamiNeural", 0.7m, false, targetDate));
                     break;
+
                 case "ZH-EN":
+                    // File lẻ: English voice + English text
                     if (!string.IsNullOrWhiteSpace(vocab.EnglishText))
                         audioFiles.Add(CreateAudioFileRecord(vocab.VocabId, "EN", $"ZH-{dateToUse}_{oddNumber:00}.mp3", "en-US-JennyNeural", 0.75m, true, targetDate));
+                    // File chẵn: Chinese voice + Chinese text
                     if (!string.IsNullOrWhiteSpace(vocab.ChineseText))
                         audioFiles.Add(CreateAudioFileRecord(vocab.VocabId, "ZH", $"ZH-{dateToUse}_{evenNumber:00}.mp3", "zh-CN-XiaoxiaoNeural", 0.7m, false, targetDate));
                     break;
+
                 case "TUVUNG":
+                    // File lẻ: English voice + English text (nhưng TuVung không có English text, nên đọc Vietnamese text)
                     if (!string.IsNullOrWhiteSpace(vocab.VietnameseText))
-                        audioFiles.Add(CreateAudioFileRecord(vocab.VocabId, "VI", $"Vocab-{dateToUse}_{oddNumber:00}.mp3", "vi-VN-HoaiMyNeural", 1.0m, true, targetDate));
-                    if (!string.IsNullOrWhiteSpace(vocab.JapaneseText))
-                        audioFiles.Add(CreateAudioFileRecord(vocab.VocabId, "JP", $"Vocab-{dateToUse}_{evenNumber:00}.mp3", "ja-JP-NanamiNeural", 0.7m, false, targetDate));
+                        audioFiles.Add(CreateAudioFileRecord(vocab.VocabId, "EN", $"Vocab-{dateToUse}_{oddNumber:00}.mp3", "en-US-JennyNeural", 0.75m, true, targetDate));
+                    // File chẵn: Vietnamese voice + Vietnamese text
+                    if (!string.IsNullOrWhiteSpace(vocab.VietnameseText))
+                        audioFiles.Add(CreateAudioFileRecord(vocab.VocabId, "VI", $"Vocab-{dateToUse}_{evenNumber:00}.mp3", "vi-VN-HoaiMyNeural", 1.0m, false, targetDate));
                     break;
             }
 

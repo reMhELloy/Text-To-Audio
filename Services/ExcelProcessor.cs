@@ -250,6 +250,7 @@ namespace Text_to_Image.Services
             }
         }
 
+        // SỬA LẠI ExcelProcessor.ProcessSoundFormulas() THEO LOGIC CŨ ĐÚNG
         private static void ProcessSoundFormulas(ExcelWorksheet worksheet, int row, ProcessingOptions options,
             string dateToUse, int currentAudioNumber)
         {
@@ -258,23 +259,28 @@ namespace Text_to_Image.Services
 
             if (options.FileName.Contains("tuvung") && options.SoundColumns.Length == 2)
             {
-                worksheet.Cells[row, 5].Value = $"[sound:EN-{dateToUse}_{oddNumber:00}.mp3]";
-                worksheet.Cells[row, 6].Value = $"[sound:VI-{dateToUse}_{evenNumber:00}.mp3]";
+                // TUVUNG: Cả 2 đều prefix Vocab- (THEO FILE TYPE)
+                worksheet.Cells[row, 5].Value = $"[sound:Vocab-{dateToUse}_{oddNumber:00}.mp3]";   // File lẻ
+                worksheet.Cells[row, 6].Value = $"[sound:Vocab-{dateToUse}_{evenNumber:00}.mp3]"; // File chẵn
             }
             else if (options.FileName.Contains("japanese") && options.SoundColumns.Length == 2)
             {
-                worksheet.Cells[row, 5].Value = $"[sound:JP-{dateToUse}_{oddNumber:00}.mp3]";
-                worksheet.Cells[row, 6].Value = $"[sound:JP-{dateToUse}_{evenNumber:00}.mp3]";
+                // JAPANESE: Cả 2 đều prefix JP- (THEO FILE TYPE)
+                worksheet.Cells[row, 5].Value = $"[sound:JP-{dateToUse}_{oddNumber:00}.mp3]";   // File lẻ
+                worksheet.Cells[row, 6].Value = $"[sound:JP-{dateToUse}_{evenNumber:00}.mp3]"; // File chẵn
             }
             else if (options.FileName.Contains("chinese") && options.SoundColumns.Length == 2)
             {
-                worksheet.Cells[row, 5].Value = $"[sound:ZH-{dateToUse}_{oddNumber:00}.mp3]";
-                worksheet.Cells[row, 6].Value = $"[sound:ZH-{dateToUse}_{evenNumber:00}.mp3]";
+                // CHINESE: Cả 2 đều prefix ZH- (THEO FILE TYPE)
+                worksheet.Cells[row, 5].Value = $"[sound:ZH-{dateToUse}_{oddNumber:00}.mp3]";   // File lẻ
+                worksheet.Cells[row, 6].Value = $"[sound:ZH-{dateToUse}_{evenNumber:00}.mp3]"; // File chẵn
             }
             else if (options.FileName.Contains("english") && options.SoundColumns.Length == 2)
             {
                 int soundCol1 = options.SoundColumns[0] - 'A' + 1;
                 int soundCol2 = options.SoundColumns[1] - 'A' + 1;
+
+                // ENGLISH: Cả 2 đều prefix EN- (THEO FILE TYPE)
                 worksheet.Cells[row, soundCol1].Value = $"[sound:EN-{dateToUse}_{oddNumber:00}.mp3]";
                 worksheet.Cells[row, soundCol2].Value = $"[sound:EN-{dateToUse}_{evenNumber:00}.mp3]";
             }

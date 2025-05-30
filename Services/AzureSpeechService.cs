@@ -254,13 +254,13 @@ namespace Text_to_Image.Services
                 string col1Formula = worksheet.Cells[row, 5].Text?.Trim(); // Column E
                 string col2Formula = worksheet.Cells[row, 6].Text?.Trim(); // Column F
 
-                // CHỈ TÃO AUDIO CHO SOUND FORMULAS CÓ SẴN
                 if (!string.IsNullOrEmpty(col1Formula) && col1Formula.Contains("[sound:"))
                 {
                     string fileName = ExtractFileNameFromFormula(col1Formula);
-                    // Xác định language và voice dựa trên filename prefix
                     string lang = ExtractLanguageFromFileName(fileName);
                     string sourceCol = GetSourceColumnForLanguage(lang, options);
+
+                    Console.WriteLine($"🔍 Row {row} File 1: {fileName} → Voice: {lang} → Read from Column: {sourceCol}");
 
                     audioFiles.Add(new AudioFileInfo
                     {
@@ -274,9 +274,10 @@ namespace Text_to_Image.Services
                 if (!string.IsNullOrEmpty(col2Formula) && col2Formula.Contains("[sound:"))
                 {
                     string fileName = ExtractFileNameFromFormula(col2Formula);
-                    // Xác định language và voice dựa trên filename prefix
                     string lang = ExtractLanguageFromFileName(fileName);
                     string sourceCol = GetSourceColumnForLanguage(lang, options);
+
+                    Console.WriteLine($"🔍 Row {row} File 2: {fileName} → Voice: {lang} → Read from Column: {sourceCol}");
 
                     audioFiles.Add(new AudioFileInfo
                     {
@@ -298,24 +299,34 @@ namespace Text_to_Image.Services
                 if (!string.IsNullOrEmpty(col1Formula) && col1Formula.Contains("[sound:"))
                 {
                     string fileName = ExtractFileNameFromFormula(col1Formula);
+                    string lang = ExtractLanguageFromFileName(fileName);
+                    string sourceCol = GetSourceColumnForLanguage(lang, options);
+
+                    Console.WriteLine($"🔍 Row {row} File 1: {fileName} → Voice: {lang} → Read from Column: {sourceCol}");
+
                     audioFiles.Add(new AudioFileInfo
                     {
                         RowIndex = row,
-                        SourceColumn = "B", // English column
+                        SourceColumn = sourceCol,
                         FileName = fileName,
-                        VoiceName = GetVoiceNameForLanguage("EN")
+                        VoiceName = GetVoiceNameForLanguage(lang)
                     });
                 }
 
                 if (!string.IsNullOrEmpty(col2Formula) && col2Formula.Contains("[sound:"))
                 {
                     string fileName = ExtractFileNameFromFormula(col2Formula);
+                    string lang = ExtractLanguageFromFileName(fileName);
+                    string sourceCol = GetSourceColumnForLanguage(lang, options);
+
+                    Console.WriteLine($"🔍 Row {row} File 2: {fileName} → Voice: {lang} → Read from Column: {sourceCol}");
+
                     audioFiles.Add(new AudioFileInfo
                     {
                         RowIndex = row,
-                        SourceColumn = "B", // English column
+                        SourceColumn = sourceCol,
                         FileName = fileName,
-                        VoiceName = GetVoiceNameForLanguage("EN")
+                        VoiceName = GetVoiceNameForLanguage(lang)
                     });
                 }
             }
@@ -323,50 +334,89 @@ namespace Text_to_Image.Services
             return audioFiles;
         }
 
-        // THÊM HELPER METHODS MỚI:
+        // FIXED: Extract language ĐÚNG cho TẤT CẢ trường hợp
         private string ExtractLanguageFromFileName(string fileName)
         {
-            // Extract language from filename: "JP-29-05-2025_02.mp3" -> "JP"
-            if (fileName.Contains("-"))
+            // Extract language from filename based on odd/even number
+            if (fileName.Contains("_"))
             {
-                return fileName.Split('-')[0];
+                var parts = fileName.Split('_');
+                if (parts.Length >= 2)
+                {
+                    var numberPart = parts[1].Split('.')[0];
+                    if (int.TryParse(numberPart, out int number))
+                    {
+                        bool isOdd = (number % 2 == 1);
+
+                        // Xác định language dựa vào file type + odd/even
+                        if (fileName.StartsWith("JP-"))
+                        {
+                            // JAPANESE: Lẻ = EN voice, Chẵn = JP voice
+                            return isOdd ? "EN" : "JP";
+                        }
+                        else if (fileName.StartsWith("ZH-"))
+                        {
+                            // CHINESE: Lẻ = EN voice, Chẵn = ZH voice  
+                            return isOdd ? "EN" : "ZH";
+                        }
+                        else if (fileName.StartsWith("Vocab-"))
+                        {
+                            // TUVUNG: Lẻ = EN voice, Chẵn = VI voice
+                            return isOdd ? "EN" : "VI";
+                        }
+                        else if (fileName.StartsWith("EN-"))
+                        {
+                            // ENGLISH: Lẻ = VI voice, Chẵn = EN voice (NGƯỢC với các loại khác)
+                            return isOdd ? "VI" : "EN";
+                        }
+                    }
+                }
             }
+
             return "EN"; // Default
         }
 
+        // FIXED: GetSourceColumnForLanguage cho TẤT CẢ trường hợp
         private string GetSourceColumnForLanguage(string language, ProcessingOptions options)
         {
             if (options.FileName.Contains("tuvung"))
             {
-                return language switch
-                {
-                    "EN" => "B", // English text
-                    "VI" => "A", // Vietnamese text
-                    _ => "A"
-                };
+                // TUVUNG: Cả EN và VI voice đều đọc Vietnamese text từ Column A
+                return "A";
             }
             else if (options.FileName.Contains("japanese"))
             {
-                // JAPANESE: Cả 2 files JP đều từ các column khác nhau
+                // JAPANESE LOGIC CŨ: EN voice đọc English (A), JP voice đọc Japanese (C)
                 return language switch
                 {
-                    "JP" => "A", // Nếu là JP file đầu tiên (odd) → đọc English text
-                    _ => "C"     // Nếu là JP file thứ hai (even) → đọc Japanese text
+                    "EN" => "A", // English voice đọc English text từ Column A
+                    "JP" => "C", // Japanese voice đọc Japanese text từ Column C  
+                    _ => "A"
                 };
             }
             else if (options.FileName.Contains("chinese"))
             {
-                // CHINESE: Cả 2 files ZH đều từ các column khác nhau
+                // CHINESE LOGIC CŨ: EN voice đọc English (A), ZH voice đọc Chinese (C)
                 return language switch
                 {
-                    "ZH" => "A", // Nếu là ZH file đầu tiên (odd) → đọc English text
-                    _ => "C"     // Nếu là ZH file thứ hai (even) → đọc Chinese text
+                    "EN" => "A", // English voice đọc English text từ Column A
+                    "ZH" => "C", // Chinese voice đọc Chinese text từ Column C
+                    _ => "A"
+                };
+            }
+            else if (options.FileName.Contains("english"))
+            {
+                // ENGLISH LOGIC CŨ: VI voice đọc Vietnamese (A), EN voice đọc English (B)
+                return language switch
+                {
+                    "VI" => "A", // Vietnamese voice đọc Vietnamese text từ Column A
+                    "EN" => "B", // English voice đọc English text từ Column B
+                    _ => "A"
                 };
             }
 
             return "A"; // Default
         }
-
         private string GetVoiceNameForLanguage(string language)
         {
             return language switch
