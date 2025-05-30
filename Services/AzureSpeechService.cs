@@ -260,8 +260,6 @@ namespace Text_to_Image.Services
                     string lang = ExtractLanguageFromFileName(fileName);
                     string sourceCol = GetSourceColumnForLanguage(lang, options);
 
-                    Console.WriteLine($"🔍 Row {row} File 1: {fileName} → Voice: {lang} → Read from Column: {sourceCol}");
-
                     audioFiles.Add(new AudioFileInfo
                     {
                         RowIndex = row,
@@ -276,8 +274,6 @@ namespace Text_to_Image.Services
                     string fileName = ExtractFileNameFromFormula(col2Formula);
                     string lang = ExtractLanguageFromFileName(fileName);
                     string sourceCol = GetSourceColumnForLanguage(lang, options);
-
-                    Console.WriteLine($"🔍 Row {row} File 2: {fileName} → Voice: {lang} → Read from Column: {sourceCol}");
 
                     audioFiles.Add(new AudioFileInfo
                     {
@@ -302,8 +298,6 @@ namespace Text_to_Image.Services
                     string lang = ExtractLanguageFromFileName(fileName);
                     string sourceCol = GetSourceColumnForLanguage(lang, options);
 
-                    Console.WriteLine($"🔍 Row {row} File 1: {fileName} → Voice: {lang} → Read from Column: {sourceCol}");
-
                     audioFiles.Add(new AudioFileInfo
                     {
                         RowIndex = row,
@@ -318,8 +312,6 @@ namespace Text_to_Image.Services
                     string fileName = ExtractFileNameFromFormula(col2Formula);
                     string lang = ExtractLanguageFromFileName(fileName);
                     string sourceCol = GetSourceColumnForLanguage(lang, options);
-
-                    Console.WriteLine($"🔍 Row {row} File 2: {fileName} → Voice: {lang} → Read from Column: {sourceCol}");
 
                     audioFiles.Add(new AudioFileInfo
                     {
