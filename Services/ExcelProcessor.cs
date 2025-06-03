@@ -133,11 +133,12 @@ namespace Text_to_Image.Services
 
                     for (int row = 1; row <= rowCount; row++)
                     {
-                        // DUPLICATE CHECK với detailed result
+                        // Duplicate check với logic mới
                         var duplicateResult = CheckRowForDuplicate(worksheet, row, existingVocabs, processedRows, options);
 
-                        // Text conversion (luôn làm)
-                        if (!string.IsNullOrWhiteSpace(options.ColumnInput) &&
+                        // Text conversion (luôn làm, trừ khi row bị xóa)
+                        if (duplicateResult.Action != "Skip" &&
+                            !string.IsNullOrWhiteSpace(options.ColumnInput) &&
                             options.ColumnInput.Length >= 1 &&
                             !options.FileName.Contains("english"))
                         {
@@ -152,36 +153,45 @@ namespace Text_to_Image.Services
                             }
                         }
 
-                        // Sound formulas xử lý
+                        // Sound formulas processing với logic mới
                         if (!string.IsNullOrWhiteSpace(options.SoundColumns))
                         {
-                            if (duplicateResult.IsDuplicate && duplicateResult.DuplicateSource == "Database")
+                            switch (duplicateResult.Action)
                             {
-                                // DATABASE DUPLICATE: Restore old sound formulas
-                                await RestoreOldSoundFormulas(worksheet, row, duplicateResult.ExistingVocab, options, dateToUse);
-                                Console.WriteLine($"Row {row}: DUPLICATE in DATABASE - RESTORED old formulas");
-                            }
-                            else if (duplicateResult.IsDuplicate && duplicateResult.DuplicateSource == "CurrentSession")
-                            {
-                                // CURRENT SESSION DUPLICATE: Clear formulas
-                                ClearSoundFormulas(worksheet, row, options);
-                                Console.WriteLine($"Row {row}: DUPLICATE in CURRENT SESSION - CLEARED formulas");
-                            }
-                            else
-                            {
-                                // NEW: Tạo sound formulas mới
-                                ProcessSoundFormulas(worksheet, row, options, dateToUse, currentAudioNumber);
+                                case "Skip":
+                                    // EXACT DUPLICATE - XÓA TOÀN BỘ ROW
+                                    ClearEntireRow(worksheet, row);
+                                    Console.WriteLine($"Row {row}: EXACT DUPLICATE - DELETED entire row (no formulas, no sound)");
+                                    break;
 
-                                var currentVocab = CreateVocabularyFromRow(worksheet, row, options);
-                                processedRows.Add(currentVocab);
+                                case "RestoreAndUpdate":
+                                    // PARTIAL DUPLICATE - restore old formulas, sẽ tạo sound với tên file cũ
+                                    await RestoreOldSoundFormulas(worksheet, row, duplicateResult.ExistingVocab, options, dateToUse);
+                                    Console.WriteLine($"Row {row}: PARTIAL DUPLICATE - RESTORED old formulas (will create sound with old filenames)");
+                                    break;
 
-                                Console.WriteLine($"Row {row}: NEW - Assigned audio {currentAudioNumber} & {currentAudioNumber + 1}");
-                                currentAudioNumber += 2;
+                                case "Clear":
+                                    // CURRENT SESSION DUPLICATE - clear formulas
+                                    ClearSoundFormulas(worksheet, row, options);
+                                    Console.WriteLine($"Row {row}: SESSION DUPLICATE - CLEARED formulas");
+                                    break;
+
+                                case "CreateNew":
+                                    // NEW ENTRY - tạo formulas mới
+                                    ProcessSoundFormulas(worksheet, row, options, dateToUse, currentAudioNumber);
+
+                                    var currentVocab = CreateVocabularyFromRow(worksheet, row, options);
+                                    processedRows.Add(currentVocab);
+
+                                    Console.WriteLine($"Row {row}: NEW ENTRY - Created formulas {currentAudioNumber} & {currentAudioNumber + 1}");
+                                    currentAudioNumber += 2;
+                                    break;
                             }
                         }
 
-                        // Kanji processing (luôn làm)
-                        if (!string.IsNullOrWhiteSpace(options.KanjiColumn) &&
+                        // Kanji processing (luôn làm) - NHƯNG SKIP NẾU ROW ĐÃ BỊ XÓA
+                        if (duplicateResult.Action != "Skip" &&
+                            !string.IsNullOrWhiteSpace(options.KanjiColumn) &&
                             options.KanjiColumn.Length >= 1 &&
                             !options.FileName.Contains("english") &&
                             (options.FileName.Contains("tuvung") ||
@@ -194,6 +204,9 @@ namespace Text_to_Image.Services
 
                     try
                     {
+                        Console.WriteLine("Compacting worksheet - removing empty rows...");
+                        CompactWorksheet(worksheet);
+
                         package.Save();
                         Console.WriteLine($"Completed! Processed {rowCount} rows.");
                         ShowProcessingSummary(options);
@@ -217,57 +230,248 @@ namespace Text_to_Image.Services
                 throw;
             }
         }
+        private static void ClearEntireRow(ExcelWorksheet worksheet, int row)
+        {
+            if (worksheet.Dimension != null)
+            {
+                int lastColumn = worksheet.Dimension.End.Column;
+                for (int col = 1; col <= lastColumn; col++)
+                {
+                    worksheet.Cells[row, col].Value = "";
+                }
+            }
+        }
+        private static void CompactWorksheet(ExcelWorksheet worksheet)
+        {
+            if (worksheet.Dimension == null) return;
 
+            int totalRows = worksheet.Dimension.End.Row;
+            int totalColumns = worksheet.Dimension.End.Column;
+            var rowsToDelete = new List<int>();
+
+            Console.WriteLine($"Checking {totalRows} rows for empty content...");
+
+            // TÌM DÒNG TRỐNG
+            for (int row = 1; row <= totalRows; row++)
+            {
+                bool isEmpty = true;
+                for (int col = 1; col <= totalColumns; col++)
+                {
+                    string cellValue = worksheet.Cells[row, col].Text?.Trim();
+                    if (!string.IsNullOrWhiteSpace(cellValue))
+                    {
+                        isEmpty = false;
+                        break;
+                    }
+                }
+
+                if (isEmpty)
+                {
+                    rowsToDelete.Add(row);
+                }
+            }
+
+            // XÓA TỪ CUỐI LÊN ĐẦU
+            if (rowsToDelete.Any())
+            {
+                Console.WriteLine($"Found {rowsToDelete.Count} empty rows, removing...");
+                for (int i = rowsToDelete.Count - 1; i >= 0; i--)
+                {
+                    worksheet.DeleteRow(rowsToDelete[i]);
+                    Console.WriteLine($"Deleted empty row {rowsToDelete[i]}");
+                }
+
+                Console.WriteLine($"Compacted worksheet: removed {rowsToDelete.Count} empty rows");
+            }
+            else
+            {
+                Console.WriteLine("No empty rows found - worksheet already clean");
+            }
+        }
         // SỬA LẠI: CheckRowForDuplicate → trả về duplicate info thay vì boolean
         private static DuplicateCheckResult CheckRowForDuplicate(ExcelWorksheet worksheet, int row,
             List<Vocabulary> existingVocabs, List<Vocabulary> processedRows, ProcessingOptions options)
         {
             var currentVocab = CreateVocabularyFromRow(worksheet, row, options);
-            string currentText = GetPrimaryText(currentVocab);
+            string fileType = DetermineFileType(options.FileName);
 
-            Console.WriteLine($"Row {row}: Checking '{currentText}'");
+            // CHECK 1: EXACT MATCH (tất cả primary fields giống nhau)
+            var exactMatch = FindExactMatchInDatabase(currentVocab, existingVocabs, fileType);
 
-            // CHECK 1: Database same day
-            var duplicateInDatabase = existingVocabs.FirstOrDefault(existing =>
-                SimilarText(existing.EnglishText, currentVocab.EnglishText) ||
-                SimilarText(existing.VietnameseText, currentVocab.VietnameseText) ||
-                SimilarText(existing.JapaneseText, currentVocab.JapaneseText) ||
-                SimilarText(existing.ChineseText, currentVocab.ChineseText)
-            );
-
-            if (duplicateInDatabase != null)
+            if (exactMatch != null)
             {
-                Console.WriteLine($"Row {row}: DUPLICATE in DATABASE (same day) - WILL UPDATE");
                 return new DuplicateCheckResult
                 {
                     IsDuplicate = true,
-                    ExistingVocab = duplicateInDatabase,
-                    DuplicateSource = "Database"
+                    ExistingVocab = exactMatch,
+                    DuplicateSource = "Database",
+                    MatchType = "Exact",
+                    Action = "Skip"
                 };
             }
 
-            // CHECK 2: Current session
-            var duplicateInCurrentSession = processedRows.FirstOrDefault(processed =>
-                SimilarText(processed.EnglishText, currentVocab.EnglishText) ||
-                SimilarText(processed.VietnameseText, currentVocab.VietnameseText) ||
-                SimilarText(processed.JapaneseText, currentVocab.JapaneseText) ||
-                SimilarText(processed.ChineseText, currentVocab.ChineseText)
-            );
+            // CHECK 2: PARTIAL MATCH (ít nhất 1 primary field giống nhau)
+            var partialMatch = FindPartialMatchInDatabase(currentVocab, existingVocabs, fileType);
 
-            if (duplicateInCurrentSession != null)
+            if (partialMatch != null)
             {
-                Console.WriteLine($"Row {row}: DUPLICATE in CURRENT SESSION - WILL CLEAR");
+
                 return new DuplicateCheckResult
                 {
                     IsDuplicate = true,
-                    ExistingVocab = duplicateInCurrentSession,
-                    DuplicateSource = "CurrentSession"
+                    ExistingVocab = partialMatch,
+                    DuplicateSource = "Database",
+                    MatchType = "Partial",
+                    Action = "RestoreAndUpdate"
                 };
             }
 
-            Console.WriteLine($"Row {row}: NEW ENTRY");
-            return new DuplicateCheckResult { IsDuplicate = false };
+            // CHECK 3: Current session duplicates (exact match only)
+            var sessionExactMatch = FindExactMatchInCurrentSession(currentVocab, processedRows, fileType);
+
+            if (sessionExactMatch != null)
+            {
+                return new DuplicateCheckResult
+                {
+                    IsDuplicate = true,
+                    ExistingVocab = sessionExactMatch,
+                    DuplicateSource = "CurrentSession",
+                    MatchType = "Exact",
+                    Action = "Clear"
+                };
+            }
+
+            // CHECK 4: Current session partial duplicates
+            var sessionPartialMatch = FindPartialMatchInCurrentSession(currentVocab, processedRows, fileType);
+
+            if (sessionPartialMatch != null)
+            {
+                return new DuplicateCheckResult
+                {
+                    IsDuplicate = true,
+                    ExistingVocab = sessionPartialMatch,
+                    DuplicateSource = "CurrentSession",
+                    MatchType = "Partial",
+                    Action = "Clear"
+                };
+            }
+
+            return new DuplicateCheckResult
+            {
+                IsDuplicate = false,
+                Action = "CreateNew"
+            };
         }
+        private static Vocabulary FindExactMatchInDatabase(Vocabulary currentVocab, List<Vocabulary> existingVocabs, string fileType)
+        {
+            return fileType.ToLower() switch
+            {
+                "english" => existingVocabs.FirstOrDefault(existing =>
+                    SimilarText(existing.VietnameseText, currentVocab.VietnameseText) &&
+                    SimilarText(existing.EnglishText, currentVocab.EnglishText)
+                ),
+
+                "japanese" => existingVocabs.FirstOrDefault(existing =>
+                    SimilarText(existing.EnglishText, currentVocab.EnglishText) &&
+                    SimilarText(existing.JapaneseText, currentVocab.JapaneseText)
+                ),
+
+                "chinese" => existingVocabs.FirstOrDefault(existing =>
+                    SimilarText(existing.EnglishText, currentVocab.EnglishText) &&
+                    SimilarText(existing.ChineseText, currentVocab.ChineseText)
+                ),
+
+                "tuvung" => existingVocabs.FirstOrDefault(existing =>
+                    SimilarText(existing.VietnameseText, currentVocab.VietnameseText) &&
+                    SimilarText(existing.JapaneseText, currentVocab.JapaneseText)
+                ),
+
+                _ => null
+            };
+        }
+
+        private static Vocabulary FindExactMatchInCurrentSession(Vocabulary currentVocab, List<Vocabulary> processedRows, string fileType)
+        {
+            return fileType.ToLower() switch
+            {
+                "english" => processedRows.FirstOrDefault(processed =>
+                    SimilarText(processed.VietnameseText, currentVocab.VietnameseText) &&
+                    SimilarText(processed.EnglishText, currentVocab.EnglishText)
+                ),
+
+                "japanese" => processedRows.FirstOrDefault(processed =>
+                    SimilarText(processed.EnglishText, currentVocab.EnglishText) &&
+                    SimilarText(processed.JapaneseText, currentVocab.JapaneseText)
+                ),
+
+                "chinese" => processedRows.FirstOrDefault(processed =>
+                    SimilarText(processed.EnglishText, currentVocab.EnglishText) &&
+                    SimilarText(processed.ChineseText, currentVocab.ChineseText)
+                ),
+
+                "tuvung" => processedRows.FirstOrDefault(processed =>
+                    SimilarText(processed.VietnameseText, currentVocab.VietnameseText) &&
+                    SimilarText(processed.JapaneseText, currentVocab.JapaneseText)
+                ),
+
+                _ => null
+            };
+        }
+        private static Vocabulary FindPartialMatchInDatabase(Vocabulary currentVocab, List<Vocabulary> existingVocabs, string fileType)
+        {
+            return fileType.ToLower() switch
+            {
+                "english" => existingVocabs.FirstOrDefault(existing =>
+                    SimilarText(existing.VietnameseText, currentVocab.VietnameseText) ||
+                    SimilarText(existing.EnglishText, currentVocab.EnglishText)
+                ),
+
+                "japanese" => existingVocabs.FirstOrDefault(existing =>
+                    SimilarText(existing.EnglishText, currentVocab.EnglishText) ||
+                    SimilarText(existing.JapaneseText, currentVocab.JapaneseText)
+                ),
+
+                "chinese" => existingVocabs.FirstOrDefault(existing =>
+                    SimilarText(existing.EnglishText, currentVocab.EnglishText) ||
+                    SimilarText(existing.ChineseText, currentVocab.ChineseText)
+                ),
+
+                "tuvung" => existingVocabs.FirstOrDefault(existing =>
+                    SimilarText(existing.VietnameseText, currentVocab.VietnameseText) ||
+                    SimilarText(existing.JapaneseText, currentVocab.JapaneseText)
+                ),
+
+                _ => null
+            };
+        }
+        private static Vocabulary FindPartialMatchInCurrentSession(Vocabulary currentVocab, List<Vocabulary> processedRows, string fileType)
+        {
+            return fileType.ToLower() switch
+            {
+                "english" => processedRows.FirstOrDefault(processed =>
+                    SimilarText(processed.VietnameseText, currentVocab.VietnameseText) ||
+                    SimilarText(processed.EnglishText, currentVocab.EnglishText)
+                ),
+
+                "japanese" => processedRows.FirstOrDefault(processed =>
+                    SimilarText(processed.EnglishText, currentVocab.EnglishText) ||
+                    SimilarText(processed.JapaneseText, currentVocab.JapaneseText)
+                ),
+
+                "chinese" => processedRows.FirstOrDefault(processed =>
+                    SimilarText(processed.EnglishText, currentVocab.EnglishText) ||
+                    SimilarText(processed.ChineseText, currentVocab.ChineseText)
+                ),
+
+                "tuvung" => processedRows.FirstOrDefault(processed =>
+                    SimilarText(processed.VietnameseText, currentVocab.VietnameseText) ||
+                    SimilarText(processed.JapaneseText, currentVocab.JapaneseText)
+                ),
+
+                _ => null
+            };
+        }
+
 
         // THÊM MỚI: Restore old sound formulas từ database
         private static async Task RestoreOldSoundFormulas(ExcelWorksheet worksheet, int row, Vocabulary existingVocab, ProcessingOptions options, string dateToUse)
@@ -551,31 +755,37 @@ namespace Text_to_Image.Services
         }
 
 
-        private static void ShowProcessingSummary(ProcessingOptions options)
+    private static void ShowProcessingSummary(ProcessingOptions options)
+    {
+    if (!string.IsNullOrWhiteSpace(options.ColumnInput) && !options.FileName.Contains("english"))
+    {
+        Console.WriteLine($"- <img>: done | {options.ColumnInput[0]} -> G");
+    }
+
+    if (!string.IsNullOrWhiteSpace(options.SoundColumns))
+    {
+        if ((options.FileName.Contains("tuvung") ||
+             options.FileName.Contains("japanese") ||
+             options.FileName.Contains("chinese")) &&
+            options.SoundColumns.Length == 2)
         {
-            if (!string.IsNullOrWhiteSpace(options.ColumnInput) && !options.FileName.Contains("english"))
-            {
-                Console.WriteLine($"- <img>: done | {options.ColumnInput[0]} -> G");
-            }
-
-            if (!string.IsNullOrWhiteSpace(options.SoundColumns))
-            {
-                if ((options.FileName.Contains("tuvung") ||
-                     options.FileName.Contains("japanese") ||
-                     options.FileName.Contains("chinese")) &&
-                    options.SoundColumns.Length == 2)
-                {
-                    Console.WriteLine("- [sound]: done | E & F (duplicates restored old formulas)");
-                }
-                else
-                {
-                    Console.WriteLine($"- [sound]: done | {options.SoundColumns} (duplicates restored old formulas)");
-                }
-            }
-
-            if (!string.IsNullOrWhiteSpace(options.KanjiColumn))
-                Console.WriteLine($"- kanji: done | {options.KanjiColumn}");
+            Console.WriteLine("- [sound]: done | E & F");
+            Console.WriteLine("  * Exact duplicates: SKIPPED (no formulas, no audio)");
+            Console.WriteLine("  * Partial duplicates: RESTORED old formulas (audio with old filenames)");
+            Console.WriteLine("  * New entries: CREATED new formulas (audio with new filenames)");
         }
+        else
+        {
+            Console.WriteLine($"- [sound]: done | {options.SoundColumns}");
+            Console.WriteLine("  * Exact duplicates: SKIPPED");
+            Console.WriteLine("  * Partial duplicates: RESTORED old formulas");
+            Console.WriteLine("  * New entries: CREATED new formulas");
+        }
+    }
+
+    if (!string.IsNullOrWhiteSpace(options.KanjiColumn))
+        Console.WriteLine($"- kanji: done | {options.KanjiColumn}");
+}
 
         private static string DetermineFileType(string fileName)
         {
@@ -607,13 +817,14 @@ namespace Text_to_Image.Services
             if (fileName.Contains("chinese")) return "ZH";
             return "";
         }
-
         // THÊM MỚI: Duplicate check result class
         public class DuplicateCheckResult
         {
             public bool IsDuplicate { get; set; }
             public Vocabulary ExistingVocab { get; set; }
             public string DuplicateSource { get; set; } // "Database" or "CurrentSession"
+            public string MatchType { get; set; } = ""; // "Exact" or "Partial"  
+            public string Action { get; set; } = ""; // "Skip", "RestoreAndUpdate", "Clear", "CreateNew"
         }
 
         // CÁC METHODS KHÁC GIỮ NGUYÊN...

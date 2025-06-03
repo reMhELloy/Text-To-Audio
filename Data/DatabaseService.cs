@@ -24,7 +24,7 @@ namespace Text_to_Image.Data
         {
             try
             {
-                Console.WriteLine("Saving Excel data to SQL Server...");
+                Console.WriteLine("Saving Excel data to SQL Server with UPSERT logic...");
 
                 string dateToUse = options.CustomDate ?? DateTime.Now.ToString("dd-MM-yyyy");
                 DateTime targetDate = DateTime.ParseExact(dateToUse, "dd-MM-yyyy", null);
@@ -35,25 +35,76 @@ namespace Text_to_Image.Data
                     FileType = DetermineFileType(options.FileName),
                     ProcessedDate = targetDate,
                     DateUsed = dateToUse,
-                    Notes = $"Processed with columns: IMG({GetColumnString(options.ColumnInput)}), Sound({options.SoundColumns}), Kanji({options.KanjiColumn})"
+                    Notes = $"Processed with columns: IMG({GetColumnString(options.ColumnInput)}), Sound({options.SoundColumns}), Kanji({options.KanjiColumn})",
+                    ProcessedRows = 0,
+                    UpdatedRows = 0
                 };
 
                 _context.ProcessingSessions.Add(session);
                 await _context.SaveChangesAsync();
 
-                var result = await ProcessExcelWithSoundFormulasOnly(options, session.SessionId, targetDate);
+                // ĐỌC TẤT CẢ DỮ LIỆU TỪ EXCEL
+                var allVocabsFromExcel = await ProcessExcelWithUpsertLogic(options, session.SessionId, targetDate);
 
-                if (result.NewVocabularies.Any())
+                // LẤY EXISTING DATA TỪ DATABASE  
+                var existingVocabs = await GetExistingVocabulariesForDateAsync(dateToUse, session.FileType);
+
+                Console.WriteLine($"Found {allVocabsFromExcel.Count} rows in Excel");
+                Console.WriteLine($"Found {existingVocabs.Count} existing vocabularies in database");
+
+                int newCount = 0, updateCount = 0, skipCount = 0;
+                var newVocabularies = new List<Vocabulary>();
+                var updatedVocabularies = new List<Vocabulary>();
+
+                foreach (var currentVocab in allVocabsFromExcel)
                 {
-                    _context.Vocabularies.AddRange(result.NewVocabularies);
-                    await _context.SaveChangesAsync();
+                    var duplicateResult = CheckVocabularyForDuplicate(currentVocab, existingVocabs, session.FileType);
 
-                    Console.WriteLine($"Saved {result.NewVocabularies.Count} NEW vocabulary entries to database.");
-                    Console.WriteLine($"Skipped {result.SkippedCount} duplicate entries.");
-
-                    if (options.CreateAudioFiles && !string.IsNullOrWhiteSpace(options.SoundColumns))
+                    switch (duplicateResult.Action)
                     {
-                        var audioFiles = CreateAudioFileRecordsFromVocabularies(result.NewVocabularies, options, targetDate);
+                        case "Skip":
+                            skipCount++;
+                            Console.WriteLine($"SKIPPED: {GetPrimaryText(currentVocab, session.FileType)}");
+                            break;
+
+                        case "Update":
+                            await UpdateExistingVocabulary(duplicateResult.ExistingVocab, currentVocab, options, dateToUse, targetDate);
+                            updatedVocabularies.Add(duplicateResult.ExistingVocab);
+                            updateCount++;
+                            Console.WriteLine($"UPDATED: {GetPrimaryText(currentVocab, session.FileType)}");
+                            break;
+
+                        case "Insert":
+                            // KHÔNG THÊM VÀO CONTEXT NGAY, CHỜ SAVE TRƯỚC
+                            newVocabularies.Add(currentVocab);
+                            newCount++;
+                            Console.WriteLine($"WILL INSERT: {GetPrimaryText(currentVocab, session.FileType)}");
+                            break;
+                    }
+                }
+
+                // SAVE NEW VOCABULARIES TRƯỚC
+                if (newVocabularies.Any())
+                {
+                    _context.Vocabularies.AddRange(newVocabularies);
+                    await _context.SaveChangesAsync(); // SAVE để có VocabId
+                    Console.WriteLine($"Saved {newVocabularies.Count} NEW vocabularies to database.");
+                }
+
+                // SAVE UPDATED VOCABULARIES  
+                if (updatedVocabularies.Any())
+                {
+                    await _context.SaveChangesAsync(); // SAVE updated ones
+                    Console.WriteLine($"Updated {updatedVocabularies.Count} existing vocabularies.");
+                }
+
+                // BÂY GIỜ TẠO AUDIO FILES VỚI VocabId VALID
+                if (options.CreateAudioFiles && !string.IsNullOrWhiteSpace(options.SoundColumns))
+                {
+                    var allVocabsForAudio = newVocabularies.Concat(updatedVocabularies).ToList();
+                    if (allVocabsForAudio.Any())
+                    {
+                        var audioFiles = CreateAudioFileRecordsFromVocabularies(allVocabsForAudio, options, targetDate);
                         if (audioFiles.Any())
                         {
                             _context.AudioFiles.AddRange(audioFiles);
@@ -64,24 +115,31 @@ namespace Text_to_Image.Data
                     }
                 }
 
-                session.ProcessedRows = result.NewVocabularies.Count;
-                session.TotalRows = result.TotalProcessed;
+                // UPDATE SESSION STATS
+                session.ProcessedRows = newCount;
+                session.UpdatedRows = updateCount;
+                session.TotalRows = allVocabsFromExcel.Count;
                 session.IsCompleted = true;
                 await _context.SaveChangesAsync();
 
                 Console.WriteLine("Excel data successfully saved to SQL Server!");
+                Console.WriteLine($"NEW entries: {newCount}");
+                Console.WriteLine($"UPDATED entries: {updateCount}");
+                Console.WriteLine($"SKIPPED entries: {skipCount}");
+
                 return session;
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"Error saving to database: {ex.Message}");
+                Console.WriteLine($"Inner exception: {ex.InnerException?.Message}");
                 throw;
             }
         }
 
-        private async Task<ProcessingResult> ProcessExcelWithSoundFormulasOnly(ProcessingOptions options, int sessionId, DateTime targetDate)
+        private async Task<List<Vocabulary>> ProcessExcelWithUpsertLogic(ProcessingOptions options, int sessionId, DateTime targetDate)
         {
-            var result = new ProcessingResult();
+            var vocabularies = new List<Vocabulary>();
             string dateToUse = options.CustomDate ?? DateTime.Now.ToString("dd-MM-yyyy");
 
             ExcelPackage.LicenseContext = LicenseContext.NonCommercial;
@@ -89,27 +147,179 @@ namespace Text_to_Image.Data
             var worksheet = package.Workbook.Worksheets[0];
             int rowCount = worksheet.Dimension?.End.Row ?? 0;
 
-            if (rowCount == 0) return result;
+            if (rowCount == 0) return vocabularies;
 
             string fileType = DetermineFileType(options.FileName);
 
             for (int row = 1; row <= rowCount; row++)
             {
-                bool hasSoundFormulas = CheckRowHasSoundFormulas(worksheet, row, options);
-
-                if (!hasSoundFormulas)
-                {
-                    result.SkippedCount++;
-                    result.TotalProcessed++;
-                    continue;
-                }
-
+                // ĐỌC TẤT CẢ ROWS, KHÔNG CHỈ ROWS CÓ SOUND FORMULAS
                 var vocab = CreateVocabularyFromExcelRow(worksheet, row, fileType, options.SelectedFile, targetDate);
-                result.NewVocabularies.Add(vocab);
-                result.TotalProcessed++;
+
+                // CHỈ THÊM VÀO LIST NẾU CÓ DATA
+                if (HasValidData(vocab, fileType))
+                {
+                    vocabularies.Add(vocab);
+                }
             }
 
-            return result;
+            return vocabularies;
+        }
+        private DuplicateCheckResult CheckVocabularyForDuplicate(Vocabulary currentVocab, List<Vocabulary> existingVocabs, string fileType)
+        {
+            // CHECK 1: EXACT MATCH (tất cả primary fields giống nhau)
+            var exactMatch = FindExactMatchInDatabase(currentVocab, existingVocabs, fileType);
+            if (exactMatch != null)
+            {
+                return new DuplicateCheckResult
+                {
+                    IsDuplicate = true,
+                    ExistingVocab = exactMatch,
+                    Action = "Skip"
+                };
+            }
+
+            // CHECK 2: PARTIAL MATCH (ít nhất 1 primary field giống nhau)
+            var partialMatch = FindPartialMatchInDatabase(currentVocab, existingVocabs, fileType);
+            if (partialMatch != null)
+            {
+                return new DuplicateCheckResult
+                {
+                    IsDuplicate = true,
+                    ExistingVocab = partialMatch,
+                    Action = "Update"
+                };
+            }
+
+            // CHECK 3: NEW ENTRY
+            return new DuplicateCheckResult
+            {
+                IsDuplicate = false,
+                Action = "Insert"
+            };
+        }
+
+        // THÊM MỚI: Update existing vocabulary
+        private async Task UpdateExistingVocabulary(Vocabulary existingVocab, Vocabulary newVocab,
+            ProcessingOptions options, string dateToUse, DateTime targetDate)
+        {
+            // UPDATE VOCABULARY FIELDS
+            if (!string.IsNullOrEmpty(newVocab.VietnameseText))
+                existingVocab.VietnameseText = newVocab.VietnameseText;
+            if (!string.IsNullOrEmpty(newVocab.EnglishText))
+                existingVocab.EnglishText = newVocab.EnglishText;
+            if (!string.IsNullOrEmpty(newVocab.JapaneseText))
+                existingVocab.JapaneseText = newVocab.JapaneseText;
+            if (!string.IsNullOrEmpty(newVocab.ChineseText))
+                existingVocab.ChineseText = newVocab.ChineseText;
+            if (!string.IsNullOrEmpty(newVocab.ReadingText))
+                existingVocab.ReadingText = newVocab.ReadingText;
+            if (!string.IsNullOrEmpty(newVocab.KanjiText))
+                existingVocab.KanjiText = newVocab.KanjiText;
+            if (!string.IsNullOrEmpty(newVocab.ImageTags))
+                existingVocab.ImageTags = newVocab.ImageTags;
+
+            // UPDATE DATES
+            existingVocab.CreatedDate = targetDate; // Update creation date
+
+            // MARK AS MODIFIED
+            _context.Entry(existingVocab).State = EntityState.Modified;
+
+            // TẠO AUDIO FILES MỚI CHO UPDATED VOCABULARY (nếu cần)
+            if (options.CreateAudioFiles && !string.IsNullOrWhiteSpace(options.SoundColumns))
+            {
+                // Xóa audio files cũ
+                var oldAudioFiles = await _context.AudioFiles
+                    .Where(a => a.VocabId == existingVocab.VocabId)
+                    .ToListAsync();
+                _context.AudioFiles.RemoveRange(oldAudioFiles);
+
+                // Tạo audio files mới
+                var newAudioFiles = CreateAudioFileRecordsFromVocabularies(new List<Vocabulary> { existingVocab }, options, targetDate);
+                _context.AudioFiles.AddRange(newAudioFiles);
+            }
+        }
+
+        // THÊM MỚI: Find exact match trong database
+        private Vocabulary FindExactMatchInDatabase(Vocabulary currentVocab, List<Vocabulary> existingVocabs, string fileType)
+        {
+            return fileType.ToLower() switch
+            {
+                "english" => existingVocabs.FirstOrDefault(existing =>
+                    SimilarText(existing.VietnameseText, currentVocab.VietnameseText) &&
+                    SimilarText(existing.EnglishText, currentVocab.EnglishText)
+                ),
+                "japanese" => existingVocabs.FirstOrDefault(existing =>
+                    SimilarText(existing.EnglishText, currentVocab.EnglishText) &&
+                    SimilarText(existing.JapaneseText, currentVocab.JapaneseText)
+                ),
+                "chinese" => existingVocabs.FirstOrDefault(existing =>
+                    SimilarText(existing.EnglishText, currentVocab.EnglishText) &&
+                    SimilarText(existing.ChineseText, currentVocab.ChineseText)
+                ),
+                "tuvung" => existingVocabs.FirstOrDefault(existing =>
+                    SimilarText(existing.VietnameseText, currentVocab.VietnameseText) &&
+                    SimilarText(existing.JapaneseText, currentVocab.JapaneseText)
+                ),
+                _ => null
+            };
+        }
+
+        // THÊM MỚI: Find partial match trong database
+        private Vocabulary FindPartialMatchInDatabase(Vocabulary currentVocab, List<Vocabulary> existingVocabs, string fileType)
+        {
+            return fileType.ToLower() switch
+            {
+                "english" => existingVocabs.FirstOrDefault(existing =>
+                    SimilarText(existing.VietnameseText, currentVocab.VietnameseText) ||
+                    SimilarText(existing.EnglishText, currentVocab.EnglishText)
+                ),
+                "japanese" => existingVocabs.FirstOrDefault(existing =>
+                    SimilarText(existing.EnglishText, currentVocab.EnglishText) ||
+                    SimilarText(existing.JapaneseText, currentVocab.JapaneseText)
+                ),
+                "chinese" => existingVocabs.FirstOrDefault(existing =>
+                    SimilarText(existing.EnglishText, currentVocab.EnglishText) ||
+                    SimilarText(existing.ChineseText, currentVocab.ChineseText)
+                ),
+                "tuvung" => existingVocabs.FirstOrDefault(existing =>
+                    SimilarText(existing.VietnameseText, currentVocab.VietnameseText) ||
+                    SimilarText(existing.JapaneseText, currentVocab.JapaneseText)
+                ),
+                _ => null
+            };
+        }
+
+        // THÊM MỚI: Helper methods
+        private bool SimilarText(string text1, string text2)
+        {
+            if (string.IsNullOrWhiteSpace(text1) || string.IsNullOrWhiteSpace(text2))
+                return false;
+            return text1.Trim().Equals(text2.Trim(), StringComparison.OrdinalIgnoreCase);
+        }
+
+        private string GetPrimaryText(Vocabulary vocab, string fileType)
+        {
+            return fileType.ToLower() switch
+            {
+                "english" => $"VI:'{vocab.VietnameseText}' / EN:'{vocab.EnglishText}'",
+                "japanese" => $"EN:'{vocab.EnglishText}' / JP:'{vocab.JapaneseText}'",
+                "chinese" => $"EN:'{vocab.EnglishText}' / ZH:'{vocab.ChineseText}'",
+                "tuvung" => $"VI:'{vocab.VietnameseText}' / JP:'{vocab.JapaneseText}'",
+                _ => vocab.EnglishText ?? vocab.VietnameseText ?? ""
+            };
+        }
+
+        private bool HasValidData(Vocabulary vocab, string fileType)
+        {
+            return fileType.ToLower() switch
+            {
+                "english" => !string.IsNullOrWhiteSpace(vocab.VietnameseText) || !string.IsNullOrWhiteSpace(vocab.EnglishText),
+                "japanese" => !string.IsNullOrWhiteSpace(vocab.EnglishText) || !string.IsNullOrWhiteSpace(vocab.JapaneseText),
+                "chinese" => !string.IsNullOrWhiteSpace(vocab.EnglishText) || !string.IsNullOrWhiteSpace(vocab.ChineseText),
+                "tuvung" => !string.IsNullOrWhiteSpace(vocab.VietnameseText) || !string.IsNullOrWhiteSpace(vocab.JapaneseText),
+                _ => true
+            };
         }
 
         private bool CheckRowHasSoundFormulas(ExcelWorksheet worksheet, int row, ProcessingOptions options)
@@ -421,6 +631,12 @@ namespace Text_to_Image.Data
             public List<Vocabulary> NewVocabularies { get; set; } = new List<Vocabulary>();
             public int SkippedCount { get; set; } = 0;
             public int TotalProcessed { get; set; } = 0;
+        }
+        public class DuplicateCheckResult
+        {
+            public bool IsDuplicate { get; set; }
+            public Vocabulary ExistingVocab { get; set; }
+            public string Action { get; set; } = ""; // "Skip", "Update", "Insert"
         }
     }
 }
