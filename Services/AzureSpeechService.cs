@@ -1,6 +1,9 @@
 ﻿using Microsoft.CognitiveServices.Speech;
 using OfficeOpenXml;
 using Text_to_Image.Models;
+using Text_to_Image.Data.Models;
+using Text_to_Image.Services;
+using Text_to_Image.Data;
 
 namespace Text_to_Image.Services
 {
@@ -9,6 +12,17 @@ namespace Text_to_Image.Services
         private readonly string _speechKey;
         private readonly string _speechRegion;
         private readonly SpeechConfig _speechConfig;
+
+        public AzureSpeechService(string speechKey, string speechRegion)
+        {
+            _speechKey = speechKey;
+            _speechRegion = speechRegion;
+            _speechConfig = SpeechConfig.FromSubscription(_speechKey, _speechRegion);
+
+            // Set output format to MP3
+            _speechConfig.SetSpeechSynthesisOutputFormat(SpeechSynthesisOutputFormat.Audio16Khz32KBitRateMonoMp3);
+        }
+
         private int GetColumnIndex(string columnLetter)
         {
             if (string.IsNullOrEmpty(columnLetter))
@@ -20,15 +34,6 @@ namespace Text_to_Image.Services
                 result = result * 26 + (columnLetter[i] - 'A' + 1);
             }
             return result;
-        }
-        public AzureSpeechService(string speechKey, string speechRegion)
-        {
-            _speechKey = speechKey;
-            _speechRegion = speechRegion;
-            _speechConfig = SpeechConfig.FromSubscription(_speechKey, _speechRegion);
-
-            // Set output format to MP3
-            _speechConfig.SetSpeechSynthesisOutputFormat(SpeechSynthesisOutputFormat.Audio16Khz32KBitRateMonoMp3);
         }
 
         // Tạo file âm thanh từ text với giọng nói tùy chọn - CÓ CHẤT LƯỢNG CHO NGƯỜI MỚI HỌC
@@ -126,68 +131,251 @@ namespace Text_to_Image.Services
             return ssml;
         }
 
-        // Thay thế hoàn toàn method ProcessExcelForAudio trong AzureSpeechService
-        // Thay thế hoàn toàn method ProcessExcelForAudio trong AzureSpeechService
-
+        // MAIN METHOD: Process Excel for Audio với logic duplicate mới
         public async Task ProcessExcelForAudio(ProcessingOptions options)
         {
             try
             {
+                Console.WriteLine("Creating audio files...");
+
+                string dateToUse = string.IsNullOrWhiteSpace(options.CustomDate) ?
+                    DateTime.Now.ToString("dd-MM-yyyy") : options.CustomDate;
+
+                // Lấy existing vocabularies từ database để check duplicates
+                List<Vocabulary> existingVocabs = new List<Vocabulary>();
+                try
+                {
+                    using var dbService = new DatabaseService();
+                    string fileType = DetermineFileType(options.FileName);
+                    existingVocabs = await dbService.GetExistingVocabulariesForDateAsync(dateToUse, fileType);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Warning: Could not load existing vocabularies: {ex.Message}");
+                }
+
                 ExcelPackage.LicenseContext = LicenseContext.NonCommercial;
                 using var package = new ExcelPackage(new FileInfo(options.SelectedFile));
                 var worksheet = package.Workbook.Worksheets[0];
-                int rowCount = worksheet.Dimension?.End.Row ?? 0;
 
+                int rowCount = worksheet.Dimension?.End.Row ?? 0;
                 if (rowCount == 0)
                 {
-                    Console.WriteLine("No data found in Excel file.");
+                    Console.WriteLine("No data in Excel file to process.");
                     return;
                 }
 
-                // Tạo danh sách các audio files cần tạo - CHỈ CHO ROWS CÓ SOUND FORMULAS
-                var audioFiles = GenerateAudioFileNamesFromFormulas(worksheet, options, rowCount);
+                var audioTasks = new List<Task>();
+                var processedInSession = new List<Vocabulary>();
 
-                if (audioFiles.Count == 0)
+                for (int row = 1; row <= rowCount; row++)
                 {
-                    Console.WriteLine("No audio files to create based on current configuration.");
-                    return;
+                    // Tạo vocabulary từ row hiện tại
+                    var currentVocab = CreateVocabularyFromRow(worksheet, row, options);
+
+                    // Check duplicate - Database hoặc Current Session
+                    var duplicateResult = CheckRowForDuplicateAudio(currentVocab, existingVocabs, processedInSession, options);
+
+                    if (duplicateResult.IsDuplicate && duplicateResult.DuplicateSource == "Database")
+                    {
+                        // DATABASE DUPLICATE: Tạo audio với tên file CŨ nhưng nội dung MỚI
+                        await CreateAudioForDatabaseDuplicate(worksheet, row, duplicateResult.ExistingVocab, options, audioTasks);
+                    }
+                    else if (duplicateResult.IsDuplicate && duplicateResult.DuplicateSource == "CurrentSession")
+                    {
+                        // CURRENT SESSION DUPLICATE: Skip tạo audio
+                        Console.WriteLine($"Row {row}: Skipping audio creation (duplicate in current session)");
+                    }
+                    else
+                    {
+                        // NEW ENTRY: Tạo audio với tên file MỚI
+                        await CreateAudioForNewEntry(worksheet, row, options, audioTasks);
+                        processedInSession.Add(currentVocab);
+                    }
                 }
 
-                Console.WriteLine($"Creating {audioFiles.Count} audio files with optimized settings for learners...");
-
-                // Đọc text từ Excel và set đường dẫn output
-                foreach (var audioFile in audioFiles)
+                // Execute tất cả audio tasks
+                if (audioTasks.Count > 0)
                 {
-                    int colIndex = GetColumnIndex(audioFile.SourceColumn);
-                    audioFile.SourceText = worksheet.Cells[audioFile.RowIndex, colIndex].Text?.Trim();
-                    audioFile.OutputPath = Path.Combine(options.AudioOutputFolder, audioFile.FileName);
+                    Console.WriteLine($"Creating {audioTasks.Count} audio files with optimized settings for learners...");
+
+                    // Tạo âm thanh song song (giới hạn 3 files cùng lúc để tránh quá tải API)
+                    var semaphore = new SemaphoreSlim(3);
+                    var tasks = audioTasks.Select(async task =>
+                    {
+                        await semaphore.WaitAsync();
+                        try
+                        {
+                            await task;
+                        }
+                        finally
+                        {
+                            semaphore.Release();
+                        }
+                    });
+
+                    await Task.WhenAll(tasks);
+                    semaphore.Dispose();
+
+                    Console.WriteLine($"Completed! Created {audioTasks.Count} audio files with learner-friendly settings.");
+                }
+                else
+                {
+                    Console.WriteLine("No audio files to create.");
                 }
 
-                // Tạo âm thanh song song (giới hạn 3 files cùng lúc để tránh quá tải API)
-                var semaphore = new SemaphoreSlim(3);
-                var tasks = new List<Task>();
-
-                foreach (var audioFile in audioFiles)
-                {
-                    tasks.Add(ProcessAudioFileTask(audioFile, semaphore));
-                }
-
-                await Task.WhenAll(tasks);
-                semaphore.Dispose();
-
-                int successCount = audioFiles.Count(af => !string.IsNullOrEmpty(af.SourceText));
-                Console.WriteLine($"Completed! Created {successCount} audio files with learner-friendly settings.");
-
-                await Task.Delay(500);
+                Console.WriteLine("All audio files have been created successfully.");
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error processing Excel for audio: {ex.Message}");
+                Console.WriteLine($"Error creating audio files: {ex.Message}");
+                throw;
             }
         }
 
-        // THÊM CÁC METHODS MỚI VÀO AzureSpeechService:
+        // THÊM MỚI: Tạo audio cho database duplicate với tên file cũ
+        private async Task CreateAudioForDatabaseDuplicate(ExcelWorksheet worksheet, int row, Vocabulary existingVocab, ProcessingOptions options, List<Task> audioTasks)
+        {
+            try
+            {
+                // Lấy audio files cũ từ database
+                using var dbService = new DatabaseService();
+                var existingAudioFiles = await dbService.GetAudioFilesByVocabIdAsync(existingVocab.VocabId);
 
+                if (existingAudioFiles == null || existingAudioFiles.Count == 0)
+                {
+                    Console.WriteLine($"Row {row}: No existing audio files found - skipping audio creation");
+                    return;
+                }
+
+                Console.WriteLine($"Row {row}: Creating audio with OLD filenames but NEW content");
+
+                // Tạo audio cho từng file cũ với nội dung mới
+                foreach (var audioFile in existingAudioFiles)
+                {
+                    string newText = GetTextForAudio(worksheet, row, audioFile.Language, options);
+                    if (!string.IsNullOrEmpty(newText))
+                    {
+                        string outputPath = Path.Combine(options.AudioOutputFolder, audioFile.FileName);
+                        var task = CreateAudioFile(newText, outputPath, audioFile.VoiceName);
+                        audioTasks.Add(task);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Row {row}: Error creating audio for duplicate - {ex.Message}");
+            }
+        }
+
+        // THÊM MỚI: Tạo audio cho new entry với tên file mới
+        private async Task CreateAudioForNewEntry(ExcelWorksheet worksheet, int row, ProcessingOptions options, List<Task> audioTasks)
+        {
+            // Check nếu row có sound formulas
+            if (!CheckRowHasAudioFormulas(worksheet, row, options))
+            {
+                Console.WriteLine($"Row {row}: Skipping audio creation (no sound formulas)");
+                return;
+            }
+
+            // Lấy sound formulas từ Excel
+            var soundFormulas = ExtractAudioFilesFromRow(worksheet, row, options);
+
+            foreach (var audioInfo in soundFormulas)
+            {
+                string text = GetTextForAudio(worksheet, row, ExtractLanguageFromFileName(audioInfo.FileName), options);
+                if (!string.IsNullOrEmpty(text))
+                {
+                    string outputPath = Path.Combine(options.AudioOutputFolder, audioInfo.FileName);
+                    var task = CreateAudioFile(text, outputPath, audioInfo.VoiceName);
+                    audioTasks.Add(task);
+                }
+            }
+        }
+
+        // THÊM MỚI: Lấy text để tạo audio dựa trên language
+        private string GetTextForAudio(ExcelWorksheet worksheet, int row, string language, ProcessingOptions options)
+        {
+            string sourceColumn = GetSourceColumnForLanguage(language, options);
+            int colIndex = GetColumnIndex(sourceColumn);
+            return worksheet.Cells[row, colIndex].Text?.Trim() ?? "";
+        }
+
+        // THÊM MỚI: Tạo vocabulary từ Excel row
+        private Vocabulary CreateVocabularyFromRow(ExcelWorksheet worksheet, int row, ProcessingOptions options)
+        {
+            var vocab = new Vocabulary();
+            string fileType = DetermineFileType(options.FileName);
+
+            switch (fileType.ToLower())
+            {
+                case "english":
+                    vocab.VietnameseText = GetCellValue(worksheet, row, 1);
+                    vocab.EnglishText = GetCellValue(worksheet, row, 2);
+                    break;
+                case "japanese":
+                    vocab.EnglishText = GetCellValue(worksheet, row, 1);
+                    vocab.ReadingText = GetCellValue(worksheet, row, 2);
+                    vocab.JapaneseText = GetCellValue(worksheet, row, 3);
+                    break;
+                case "chinese":
+                    vocab.EnglishText = GetCellValue(worksheet, row, 1);
+                    vocab.ReadingText = GetCellValue(worksheet, row, 2);
+                    vocab.ChineseText = GetCellValue(worksheet, row, 3);
+                    break;
+                case "tuvung":
+                    vocab.VietnameseText = GetCellValue(worksheet, row, 1);
+                    vocab.ReadingText = GetCellValue(worksheet, row, 2);
+                    vocab.JapaneseText = GetCellValue(worksheet, row, 3);
+                    break;
+            }
+
+            return vocab;
+        }
+
+        // THÊM MỚI: Check duplicate cho audio processing
+        private DuplicateCheckResult CheckRowForDuplicateAudio(Vocabulary currentVocab, List<Vocabulary> existingVocabs, List<Vocabulary> processedInSession, ProcessingOptions options)
+        {
+            // CHECK 1: Database same day
+            var duplicateInDatabase = existingVocabs.FirstOrDefault(existing =>
+                SimilarText(existing.EnglishText, currentVocab.EnglishText) ||
+                SimilarText(existing.VietnameseText, currentVocab.VietnameseText) ||
+                SimilarText(existing.JapaneseText, currentVocab.JapaneseText) ||
+                SimilarText(existing.ChineseText, currentVocab.ChineseText)
+            );
+
+            if (duplicateInDatabase != null)
+            {
+                return new DuplicateCheckResult
+                {
+                    IsDuplicate = true,
+                    ExistingVocab = duplicateInDatabase,
+                    DuplicateSource = "Database"
+                };
+            }
+
+            // CHECK 2: Current session
+            var duplicateInCurrentSession = processedInSession.FirstOrDefault(processed =>
+                SimilarText(processed.EnglishText, currentVocab.EnglishText) ||
+                SimilarText(processed.VietnameseText, currentVocab.VietnameseText) ||
+                SimilarText(processed.JapaneseText, currentVocab.JapaneseText) ||
+                SimilarText(processed.ChineseText, currentVocab.ChineseText)
+            );
+
+            if (duplicateInCurrentSession != null)
+            {
+                return new DuplicateCheckResult
+                {
+                    IsDuplicate = true,
+                    ExistingVocab = duplicateInCurrentSession,
+                    DuplicateSource = "CurrentSession"
+                };
+            }
+
+            return new DuplicateCheckResult { IsDuplicate = false };
+        }
+
+        // ORIGINAL METHOD: Check row có audio formulas không
         private bool CheckRowHasAudioFormulas(ExcelWorksheet worksheet, int row, ProcessingOptions options)
         {
             if (string.IsNullOrWhiteSpace(options.SoundColumns)) return false;
@@ -224,25 +412,7 @@ namespace Text_to_Image.Services
             return false;
         }
 
-        private List<AudioFileInfo> GenerateAudioFileNamesFromFormulas(ExcelWorksheet worksheet, ProcessingOptions options, int rowCount)
-        {
-            var audioFiles = new List<AudioFileInfo>();
-
-            for (int row = 1; row <= rowCount; row++)
-            {
-                if (!CheckRowHasAudioFormulas(worksheet, row, options))
-                {
-                    Console.WriteLine($"Row {row}: Skipping audio creation (no sound formulas - duplicate entry)");
-                    continue;
-                }
-
-                var rowAudioFiles = ExtractAudioFilesFromRow(worksheet, row, options);
-                audioFiles.AddRange(rowAudioFiles);
-            }
-
-            return audioFiles;
-        }
-
+        // ORIGINAL METHOD: Extract audio files từ row
         private List<AudioFileInfo> ExtractAudioFilesFromRow(ExcelWorksheet worksheet, int row, ProcessingOptions options)
         {
             var audioFiles = new List<AudioFileInfo>();
@@ -409,6 +579,7 @@ namespace Text_to_Image.Services
 
             return "A"; // Default
         }
+
         private string GetVoiceNameForLanguage(string language)
         {
             return language switch
@@ -432,20 +603,28 @@ namespace Text_to_Image.Services
             return "";
         }
 
-        private async Task ProcessAudioFileTask(AudioFileInfo audioFile, SemaphoreSlim semaphore)
+        // THÊM MỚI: Helper methods
+        private string GetCellValue(ExcelWorksheet worksheet, int row, int column)
         {
-            await semaphore.WaitAsync();
-            try
-            {
-                if (!string.IsNullOrEmpty(audioFile.SourceText))
-                {
-                    await CreateAudioFile(audioFile.SourceText, audioFile.OutputPath, audioFile.VoiceName);
-                }
-            }
-            finally
-            {
-                semaphore.Release();
-            }
+            var value = worksheet.Cells[row, column].Text?.Trim();
+            return string.IsNullOrEmpty(value) ? "" : value;
+        }
+
+        private bool SimilarText(string text1, string text2)
+        {
+            if (string.IsNullOrWhiteSpace(text1) || string.IsNullOrWhiteSpace(text2))
+                return false;
+            return text1.Trim().Equals(text2.Trim(), StringComparison.OrdinalIgnoreCase);
+        }
+
+        private string DetermineFileType(string fileName)
+        {
+            fileName = fileName.ToLower();
+            if (fileName.Contains("english")) return "English";
+            if (fileName.Contains("japanese")) return "Japanese";
+            if (fileName.Contains("chinese")) return "Chinese";
+            if (fileName.Contains("tuvung")) return "TuVung";
+            return "Unknown";
         }
 
         // Method để test SSML output (có thể dùng để debug)
@@ -453,6 +632,13 @@ namespace Text_to_Image.Services
         {
             return CreateSSMLForLearners(text, voiceName);
         }
-    }
 
+        // Helper classes
+        public class DuplicateCheckResult
+        {
+            public bool IsDuplicate { get; set; }
+            public Vocabulary ExistingVocab { get; set; }
+            public string DuplicateSource { get; set; } // "Database" or "CurrentSession"
+        }
+    }
 }

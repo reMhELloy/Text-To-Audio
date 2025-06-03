@@ -3,6 +3,7 @@ using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Text_to_Image.Data;
 
@@ -11,9 +12,10 @@ using Text_to_Image.Data;
 namespace Text_to_Image.Migrations
 {
     [DbContext(typeof(LanguageLearningContext))]
-    partial class LanguageLearningContextModelSnapshot : ModelSnapshot
+    [Migration("20250531062029_Update_All-Table")]
+    partial class Update_AllTable
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -113,9 +115,6 @@ namespace Text_to_Image.Migrations
                         .HasColumnType("int");
 
                     b.Property<int>("TotalRows")
-                        .HasColumnType("int");
-
-                    b.Property<int>("UpdatedRows")
                         .HasColumnType("int");
 
                     b.HasKey("SessionId");

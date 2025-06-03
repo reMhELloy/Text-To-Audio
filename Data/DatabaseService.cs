@@ -388,6 +388,21 @@ namespace Text_to_Image.Data
                 return summary;
             }
         }
+        public async Task<List<AudioFile>> GetAudioFilesByVocabIdAsync(int vocabId)
+        {
+            try
+            {
+                return await _context.AudioFiles
+                    .Where(a => a.VocabId == vocabId)
+                    .OrderBy(a => a.IsOddFile ? 0 : 1) // Odd file trước, Even file sau
+                    .ToListAsync();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error getting audio files for VocabId {vocabId}: {ex.Message}");
+                return new List<AudioFile>();
+            }
+        }
 
         public void Dispose()
         {

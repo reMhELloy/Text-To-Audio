@@ -19,6 +19,7 @@ namespace Text_to_Image.Data.Models
         public int TotalRows { get; set; }
 
         public int ProcessedRows { get; set; }
+        public int UpdatedRows { get; set; }
 
         public int AudioFilesCreated { get; set; }
 

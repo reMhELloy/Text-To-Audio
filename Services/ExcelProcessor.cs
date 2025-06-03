@@ -72,10 +72,12 @@ namespace Text_to_Image.Services
             }
         }
 
+        // SỬA LẠI: ProcessExcelFile - Hỗ trợ UPDATE duplicates
         public static async Task ProcessExcelFile(ProcessingOptions options)
         {
             try
             {
+                RemoveDuplicateRows(options.SelectedFile, options);
                 Console.WriteLine("Processing Excel file with database integration...");
 
                 string dateToUse = string.IsNullOrWhiteSpace(options.CustomDate) ?
@@ -124,17 +126,17 @@ namespace Text_to_Image.Services
                     }
 
                     Console.WriteLine($"Excel file has {rowCount} rows.");
-                    Console.WriteLine("Starting duplicate checking: SAME DAY database + CURRENT SESSION...");
+                    Console.WriteLine("Starting processing with UPDATE for duplicates...");
 
                     int currentAudioNumber = existingAudioCount + 1;
                     var processedRows = new List<Vocabulary>();
 
                     for (int row = 1; row <= rowCount; row++)
                     {
-                        // DUPLICATE CHECK: Database same day + Current session
-                        bool isDuplicate = CheckRowForDuplicate(worksheet, row, existingVocabs, processedRows, options);
+                        // DUPLICATE CHECK với detailed result
+                        var duplicateResult = CheckRowForDuplicate(worksheet, row, existingVocabs, processedRows, options);
 
-                        // Text conversion
+                        // Text conversion (luôn làm)
                         if (!string.IsNullOrWhiteSpace(options.ColumnInput) &&
                             options.ColumnInput.Length >= 1 &&
                             !options.FileName.Contains("english"))
@@ -150,16 +152,24 @@ namespace Text_to_Image.Services
                             }
                         }
 
-                        // Sound formulas
+                        // Sound formulas xử lý
                         if (!string.IsNullOrWhiteSpace(options.SoundColumns))
                         {
-                            if (isDuplicate)
+                            if (duplicateResult.IsDuplicate && duplicateResult.DuplicateSource == "Database")
                             {
+                                // DATABASE DUPLICATE: Restore old sound formulas
+                                await RestoreOldSoundFormulas(worksheet, row, duplicateResult.ExistingVocab, options, dateToUse);
+                                Console.WriteLine($"Row {row}: DUPLICATE in DATABASE - RESTORED old formulas");
+                            }
+                            else if (duplicateResult.IsDuplicate && duplicateResult.DuplicateSource == "CurrentSession")
+                            {
+                                // CURRENT SESSION DUPLICATE: Clear formulas
                                 ClearSoundFormulas(worksheet, row, options);
-                                Console.WriteLine($"Row {row}: Duplicate - CLEARED formulas");
+                                Console.WriteLine($"Row {row}: DUPLICATE in CURRENT SESSION - CLEARED formulas");
                             }
                             else
                             {
+                                // NEW: Tạo sound formulas mới
                                 ProcessSoundFormulas(worksheet, row, options, dateToUse, currentAudioNumber);
 
                                 var currentVocab = CreateVocabularyFromRow(worksheet, row, options);
@@ -170,7 +180,7 @@ namespace Text_to_Image.Services
                             }
                         }
 
-                        // Kanji processing
+                        // Kanji processing (luôn làm)
                         if (!string.IsNullOrWhiteSpace(options.KanjiColumn) &&
                             options.KanjiColumn.Length >= 1 &&
                             !options.FileName.Contains("english") &&
@@ -208,8 +218,8 @@ namespace Text_to_Image.Services
             }
         }
 
-        // FINAL LOGIC: Check duplicate - Database same day + Current session
-        private static bool CheckRowForDuplicate(ExcelWorksheet worksheet, int row,
+        // SỬA LẠI: CheckRowForDuplicate → trả về duplicate info thay vì boolean
+        private static DuplicateCheckResult CheckRowForDuplicate(ExcelWorksheet worksheet, int row,
             List<Vocabulary> existingVocabs, List<Vocabulary> processedRows, ProcessingOptions options)
         {
             var currentVocab = CreateVocabularyFromRow(worksheet, row, options);
@@ -218,39 +228,106 @@ namespace Text_to_Image.Services
             Console.WriteLine($"Row {row}: Checking '{currentText}'");
 
             // CHECK 1: Database same day
-            bool isDuplicateInDatabase = existingVocabs.Any(existing =>
+            var duplicateInDatabase = existingVocabs.FirstOrDefault(existing =>
                 SimilarText(existing.EnglishText, currentVocab.EnglishText) ||
                 SimilarText(existing.VietnameseText, currentVocab.VietnameseText) ||
                 SimilarText(existing.JapaneseText, currentVocab.JapaneseText) ||
                 SimilarText(existing.ChineseText, currentVocab.ChineseText)
             );
 
+            if (duplicateInDatabase != null)
+            {
+                Console.WriteLine($"Row {row}: DUPLICATE in DATABASE (same day) - WILL UPDATE");
+                return new DuplicateCheckResult
+                {
+                    IsDuplicate = true,
+                    ExistingVocab = duplicateInDatabase,
+                    DuplicateSource = "Database"
+                };
+            }
+
             // CHECK 2: Current session
-            bool isDuplicateInCurrentSession = processedRows.Any(processed =>
+            var duplicateInCurrentSession = processedRows.FirstOrDefault(processed =>
                 SimilarText(processed.EnglishText, currentVocab.EnglishText) ||
                 SimilarText(processed.VietnameseText, currentVocab.VietnameseText) ||
                 SimilarText(processed.JapaneseText, currentVocab.JapaneseText) ||
                 SimilarText(processed.ChineseText, currentVocab.ChineseText)
             );
 
-            if (isDuplicateInDatabase)
+            if (duplicateInCurrentSession != null)
             {
-                Console.WriteLine($"Row {row}: DUPLICATE in DATABASE (same day)");
-                return true;
+                Console.WriteLine($"Row {row}: DUPLICATE in CURRENT SESSION - WILL CLEAR");
+                return new DuplicateCheckResult
+                {
+                    IsDuplicate = true,
+                    ExistingVocab = duplicateInCurrentSession,
+                    DuplicateSource = "CurrentSession"
+                };
             }
-            else if (isDuplicateInCurrentSession)
+
+            Console.WriteLine($"Row {row}: NEW ENTRY");
+            return new DuplicateCheckResult { IsDuplicate = false };
+        }
+
+        // THÊM MỚI: Restore old sound formulas từ database
+        private static async Task RestoreOldSoundFormulas(ExcelWorksheet worksheet, int row, Vocabulary existingVocab, ProcessingOptions options, string dateToUse)
+        {
+            if (string.IsNullOrWhiteSpace(options.SoundColumns)) return;
+
+            try
             {
-                Console.WriteLine($"Row {row}: DUPLICATE in CURRENT SESSION");
-                return true;
+                // Lấy audio files cũ từ database
+                using var dbService = new DatabaseService();
+                var existingAudioFiles = await dbService.GetAudioFilesByVocabIdAsync(existingVocab.VocabId);
+
+                if (existingAudioFiles != null && existingAudioFiles.Count >= 2)
+                {
+                    if ((options.FileName.Contains("tuvung") ||
+                         options.FileName.Contains("japanese") ||
+                         options.FileName.Contains("chinese")) && options.SoundColumns.Length == 2)
+                    {
+                        // Sắp xếp theo IsOddFile để đảm bảo đúng thứ tự
+                        var oddFile = existingAudioFiles.FirstOrDefault(a => a.IsOddFile);
+                        var evenFile = existingAudioFiles.FirstOrDefault(a => !a.IsOddFile);
+
+                        if (oddFile != null)
+                            worksheet.Cells[row, 5].Value = $"[sound:{oddFile.FileName}]";
+                        if (evenFile != null)
+                            worksheet.Cells[row, 6].Value = $"[sound:{evenFile.FileName}]";
+
+                        Console.WriteLine($"Row {row}: Restored formulas - {oddFile?.FileName}, {evenFile?.FileName}");
+                    }
+                    else if (options.FileName.Contains("english") && options.SoundColumns.Length == 2)
+                    {
+                        int soundCol1 = options.SoundColumns[0] - 'A' + 1;
+                        int soundCol2 = options.SoundColumns[1] - 'A' + 1;
+
+                        var oddFile = existingAudioFiles.FirstOrDefault(a => a.IsOddFile);
+                        var evenFile = existingAudioFiles.FirstOrDefault(a => !a.IsOddFile);
+
+                        if (oddFile != null)
+                            worksheet.Cells[row, soundCol1].Value = $"[sound:{oddFile.FileName}]";
+                        if (evenFile != null)
+                            worksheet.Cells[row, soundCol2].Value = $"[sound:{evenFile.FileName}]";
+
+                        Console.WriteLine($"Row {row}: Restored formulas - {oddFile?.FileName}, {evenFile?.FileName}");
+                    }
+                }
+                else
+                {
+                    // Nếu không tìm thấy audio files cũ, clear formulas
+                    ClearSoundFormulas(worksheet, row, options);
+                    Console.WriteLine($"Row {row}: No existing audio files found - CLEARED formulas");
+                }
             }
-            else
+            catch (Exception ex)
             {
-                Console.WriteLine($"Row {row}: NEW ENTRY");
-                return false;
+                Console.WriteLine($"Warning: Could not restore old formulas for row {row}: {ex.Message}");
+                // Fallback: clear formulas
+                ClearSoundFormulas(worksheet, row, options);
             }
         }
 
-        // SỬA LẠI ExcelProcessor.ProcessSoundFormulas() THEO LOGIC CŨ ĐÚNG
         private static void ProcessSoundFormulas(ExcelWorksheet worksheet, int row, ProcessingOptions options,
             string dateToUse, int currentAudioNumber)
         {
@@ -259,28 +336,23 @@ namespace Text_to_Image.Services
 
             if (options.FileName.Contains("tuvung") && options.SoundColumns.Length == 2)
             {
-                // TUVUNG: Cả 2 đều prefix Vocab- (THEO FILE TYPE)
-                worksheet.Cells[row, 5].Value = $"[sound:Vocab-{dateToUse}_{oddNumber:00}.mp3]";   // File lẻ
-                worksheet.Cells[row, 6].Value = $"[sound:Vocab-{dateToUse}_{evenNumber:00}.mp3]"; // File chẵn
+                worksheet.Cells[row, 5].Value = $"[sound:Vocab-{dateToUse}_{oddNumber:00}.mp3]";
+                worksheet.Cells[row, 6].Value = $"[sound:Vocab-{dateToUse}_{evenNumber:00}.mp3]";
             }
             else if (options.FileName.Contains("japanese") && options.SoundColumns.Length == 2)
             {
-                // JAPANESE: Cả 2 đều prefix JP- (THEO FILE TYPE)
-                worksheet.Cells[row, 5].Value = $"[sound:JP-{dateToUse}_{oddNumber:00}.mp3]";   // File lẻ
-                worksheet.Cells[row, 6].Value = $"[sound:JP-{dateToUse}_{evenNumber:00}.mp3]"; // File chẵn
+                worksheet.Cells[row, 5].Value = $"[sound:JP-{dateToUse}_{oddNumber:00}.mp3]";
+                worksheet.Cells[row, 6].Value = $"[sound:JP-{dateToUse}_{evenNumber:00}.mp3]";
             }
             else if (options.FileName.Contains("chinese") && options.SoundColumns.Length == 2)
             {
-                // CHINESE: Cả 2 đều prefix ZH- (THEO FILE TYPE)
-                worksheet.Cells[row, 5].Value = $"[sound:ZH-{dateToUse}_{oddNumber:00}.mp3]";   // File lẻ
-                worksheet.Cells[row, 6].Value = $"[sound:ZH-{dateToUse}_{evenNumber:00}.mp3]"; // File chẵn
+                worksheet.Cells[row, 5].Value = $"[sound:ZH-{dateToUse}_{oddNumber:00}.mp3]";
+                worksheet.Cells[row, 6].Value = $"[sound:ZH-{dateToUse}_{evenNumber:00}.mp3]";
             }
             else if (options.FileName.Contains("english") && options.SoundColumns.Length == 2)
             {
                 int soundCol1 = options.SoundColumns[0] - 'A' + 1;
                 int soundCol2 = options.SoundColumns[1] - 'A' + 1;
-
-                // ENGLISH: Cả 2 đều prefix EN- (THEO FILE TYPE)
                 worksheet.Cells[row, soundCol1].Value = $"[sound:EN-{dateToUse}_{oddNumber:00}.mp3]";
                 worksheet.Cells[row, soundCol2].Value = $"[sound:EN-{dateToUse}_{evenNumber:00}.mp3]";
             }
@@ -389,6 +461,95 @@ namespace Text_to_Image.Services
                 worksheet.Cells[row, outputCol].Value = formattedText;
             }
         }
+        private static int RemoveDuplicateRows(string filePath, ProcessingOptions options)
+        {
+            try
+            {
+                ExcelPackage.LicenseContext = LicenseContext.NonCommercial;
+                using var package = new ExcelPackage(new FileInfo(filePath));
+                var worksheet = package.Workbook.Worksheets[0];
+
+                if (worksheet.Dimension == null) return 0;
+
+                int totalRows = worksheet.Dimension.End.Row;
+                var duplicateRows = new List<int>();
+                var seenData = new HashSet<string>();
+
+                for (int row = 1; row <= totalRows; row++)
+                {
+                    string rowKey = CreateRowKey(worksheet, row, options);
+
+                    if (string.IsNullOrWhiteSpace(rowKey)) continue;
+
+                    if (seenData.Contains(rowKey))
+                    {
+                        duplicateRows.Add(row);
+                    }
+                    else
+                    {
+                        seenData.Add(rowKey);
+                    }
+                }
+
+                // Xóa từ cuối lên đầu
+                for (int i = duplicateRows.Count - 1; i >= 0; i--)
+                {
+                    worksheet.DeleteRow(duplicateRows[i]);
+                }
+
+                if (duplicateRows.Count > 0)
+                {
+                    package.Save();
+                    Console.WriteLine($"Removed {duplicateRows.Count} duplicate rows.");
+                }
+
+                return duplicateRows.Count;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error removing duplicates: {ex.Message}");
+                return 0;
+            }
+        }
+        private static string CreateRowKey(ExcelWorksheet worksheet, int row, ProcessingOptions options)
+        {
+            string fileName = options.FileName.ToLower();
+
+            if (fileName.Contains("english"))
+            {
+                string vietnamese = GetCellValue(worksheet, row, 1);
+                string english = GetCellValue(worksheet, row, 2);
+                if (string.IsNullOrWhiteSpace(vietnamese) && string.IsNullOrWhiteSpace(english)) return "";
+                return $"VI:{vietnamese}|EN:{english}";
+            }
+            else if (fileName.Contains("japanese"))
+            {
+                string english = GetCellValue(worksheet, row, 1);
+                string reading = GetCellValue(worksheet, row, 2);
+                string japanese = GetCellValue(worksheet, row, 3);
+                if (string.IsNullOrWhiteSpace(english) && string.IsNullOrWhiteSpace(reading) && string.IsNullOrWhiteSpace(japanese)) return "";
+                return $"EN:{english}|RD:{reading}|JP:{japanese}";
+            }
+            else if (fileName.Contains("chinese"))
+            {
+                string english = GetCellValue(worksheet, row, 1);
+                string reading = GetCellValue(worksheet, row, 2);
+                string chinese = GetCellValue(worksheet, row, 3);
+                if (string.IsNullOrWhiteSpace(english) && string.IsNullOrWhiteSpace(reading) && string.IsNullOrWhiteSpace(chinese)) return "";
+                return $"EN:{english}|RD:{reading}|ZH:{chinese}";
+            }
+            else if (fileName.Contains("tuvung"))
+            {
+                string vietnamese = GetCellValue(worksheet, row, 1);
+                string reading = GetCellValue(worksheet, row, 2);
+                string japanese = GetCellValue(worksheet, row, 3);
+                if (string.IsNullOrWhiteSpace(vietnamese) && string.IsNullOrWhiteSpace(reading) && string.IsNullOrWhiteSpace(japanese)) return "";
+                return $"VI:{vietnamese}|RD:{reading}|JP:{japanese}";
+            }
+
+            return "";
+        }
+
 
         private static void ShowProcessingSummary(ProcessingOptions options)
         {
@@ -404,11 +565,11 @@ namespace Text_to_Image.Services
                      options.FileName.Contains("chinese")) &&
                     options.SoundColumns.Length == 2)
                 {
-                    Console.WriteLine("- [sound]: done | E (odd-EN) & F (even-native)");
+                    Console.WriteLine("- [sound]: done | E & F (duplicates restored old formulas)");
                 }
                 else
                 {
-                    Console.WriteLine($"- [sound]: done | {options.SoundColumns}");
+                    Console.WriteLine($"- [sound]: done | {options.SoundColumns} (duplicates restored old formulas)");
                 }
             }
 
@@ -447,6 +608,15 @@ namespace Text_to_Image.Services
             return "";
         }
 
+        // THÊM MỚI: Duplicate check result class
+        public class DuplicateCheckResult
+        {
+            public bool IsDuplicate { get; set; }
+            public Vocabulary ExistingVocab { get; set; }
+            public string DuplicateSource { get; set; } // "Database" or "CurrentSession"
+        }
+
+        // CÁC METHODS KHÁC GIỮ NGUYÊN...
         public static System.Diagnostics.Process OpenExcelFile(string filePath)
         {
             try
@@ -562,7 +732,8 @@ namespace Text_to_Image.Services
 
                     Console.WriteLine("Database Summary:");
                     Console.WriteLine($"Session ID: {session.SessionId}");
-                    Console.WriteLine($"Processed: {session.ProcessedRows} vocabulary entries");
+                    Console.WriteLine($"NEW entries: {session.ProcessedRows} vocabulary entries");
+                    Console.WriteLine($"UPDATED entries: {session.UpdatedRows} vocabulary entries"); // THÊM MỚI
                     Console.WriteLine($"Audio records: {session.AudioFilesCreated}");
                     Console.WriteLine($"File type: {session.FileType}");
                     Console.WriteLine($"Date: {session.DateUsed}");
