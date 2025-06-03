@@ -148,6 +148,7 @@ namespace Text_to_Image.Services
                     using var dbService = new DatabaseService();
                     string fileType = DetermineFileType(options.FileName);
                     existingVocabs = await dbService.GetExistingVocabulariesForDateAsync(dateToUse, fileType);
+                    Console.WriteLine($"Found {existingVocabs.Count} existing vocabularies for {dateToUse} ({fileType})");
                 }
                 catch (Exception ex)
                 {
@@ -167,35 +168,51 @@ namespace Text_to_Image.Services
 
                 var audioTasks = new List<Task>();
                 var processedInSession = new List<Vocabulary>();
+                var processingResults = new List<AudioProcessingInfo>();
 
+                // PHASE 1: Collect processing info
+                Console.WriteLine("PHASE 1: Collecting audio processing information...");
                 for (int row = 1; row <= rowCount; row++)
                 {
-                    // Tạo vocabulary từ row hiện tại
                     var currentVocab = CreateVocabularyFromRow(worksheet, row, options);
-
-                    // Check duplicate - Database hoặc Current Session
                     var duplicateResult = CheckRowForDuplicateAudio(currentVocab, existingVocabs, processedInSession, options);
 
-                    if (duplicateResult.IsDuplicate && duplicateResult.Action == "Skip")
+                    var processingInfo = new AudioProcessingInfo
                     {
-                        // EXACT DUPLICATE hoặc CURRENT SESSION DUPLICATE: Skip tạo audio
-                        string reason = duplicateResult.MatchType == "Exact" ? "exact duplicate" : "duplicate in current session";
-                        Console.WriteLine($"Row {row}: SKIPPED - {reason}");
-                    }
-                    else if (duplicateResult.IsDuplicate && duplicateResult.Action == "RestoreAndUpdate")
+                        Vocabulary = currentVocab,
+                        DuplicateResult = duplicateResult,
+                        RowNumber = row,
+                        HasAudioFormulas = CheckRowHasAudioFormulas(worksheet, row, options)
+                    };
+
+                    processingResults.Add(processingInfo);
+
+                    // Track CreateNew entries for session duplicate checking
+                    if (duplicateResult.Action == "CreateNew")
                     {
-                        // PARTIAL DUPLICATE: Tạo audio với tên file CŨ nhưng nội dung MỚI
-                        Console.WriteLine($"Row {row}: PARTIAL DUPLICATE - creating audio with old filenames");
-                        await CreateAudioForDatabaseDuplicate(worksheet, row, duplicateResult.ExistingVocab, options, audioTasks);
-                    }
-                    else
-                    {
-                        // NEW ENTRY: Tạo audio với tên file MỚI
-                        Console.WriteLine($"Row {row}: NEW ENTRY - creating audio with new filenames");
-                        await CreateAudioForNewEntry(worksheet, row, options, audioTasks);
                         processedInSession.Add(currentVocab);
                     }
                 }
+
+                // PHASE 2: Apply conflict resolution logic
+                Console.WriteLine("PHASE 2: Applying audio conflict resolution logic...");
+                ApplyAudioConflictResolutionLogic(processingResults, existingVocabs, options);
+
+                // PHASE 2.5: Track additional entries that became CreateNewConflict
+                Console.WriteLine("PHASE 2.5: Updating processed rows tracking for CreateNewConflict entries...");
+                foreach (var info in processingResults)
+                {
+                    if (info.DuplicateResult.Action == "CreateNewConflict" &&
+                        !processedInSession.Any(p => SimilarVocabulary(p, info.Vocabulary, DetermineFileType(options.FileName))))
+                    {
+                        processedInSession.Add(info.Vocabulary);
+                        Console.WriteLine($"  Added CreateNewConflict row {info.RowNumber} to processed tracking");
+                    }
+                }
+
+                // PHASE 3: Execute audio creation based on processing results
+                Console.WriteLine("PHASE 3: Executing audio creation actions...");
+                await ExecuteAudioCreationActions(worksheet, processingResults, options, audioTasks);
 
                 // Execute tất cả audio tasks
                 if (audioTasks.Count > 0)
@@ -235,6 +252,144 @@ namespace Text_to_Image.Services
                 throw;
             }
         }
+        private void ApplyAudioConflictResolutionLogic(List<AudioProcessingInfo> processingResults, List<Vocabulary> existingVocabs, ProcessingOptions options)
+        {
+            string fileType = DetermineFileType(options.FileName);
+            var partialMatchGroups = new Dictionary<string, List<AudioProcessingInfo>>();
+
+            // Group partial matches by existing vocab
+            foreach (var info in processingResults)
+            {
+                if (info.DuplicateResult.IsDuplicate && info.DuplicateResult.MatchType == "Partial")
+                {
+                    string groupKey = $"{info.DuplicateResult.ExistingVocab.VocabId}";
+
+                    if (!partialMatchGroups.ContainsKey(groupKey))
+                        partialMatchGroups[groupKey] = new List<AudioProcessingInfo>();
+
+                    partialMatchGroups[groupKey].Add(info);
+                }
+            }
+
+            // Apply conflict resolution
+            foreach (var group in partialMatchGroups.Values)
+            {
+                if (group.Count > 1)
+                {
+                    // Multiple rows match same existing vocab
+                    for (int i = 0; i < group.Count; i++)
+                    {
+                        var info = group[i];
+                        var conflictFields = GetConflictFields(info.Vocabulary, info.DuplicateResult.ExistingVocab, fileType);
+
+                        if (i == 0)
+                        {
+                            // First row: RESTORE old audio
+                            info.DuplicateResult.Action = "RestoreAndUpdate";
+                            Console.WriteLine($"Row {info.RowNumber}: CONFLICT (FIRST) in [{string.Join(", ", conflictFields)}] - RESTORED old audio");
+                        }
+                        else
+                        {
+                            // Subsequent rows: CREATE new audio
+                            info.DuplicateResult.Action = "CreateNewConflict";
+                            Console.WriteLine($"Row {info.RowNumber}: CONFLICT (SUBSEQUENT) in [{string.Join(", ", conflictFields)}] - Created NEW audio");
+                        }
+                    }
+                }
+            }
+        }
+        private bool SimilarVocabulary(Vocabulary vocab1, Vocabulary vocab2, string fileType)
+        {
+            return fileType.ToLower() switch
+            {
+                "english" => SimilarText(vocab1.VietnameseText, vocab2.VietnameseText) &&
+                             SimilarText(vocab1.EnglishText, vocab2.EnglishText),
+                "japanese" => SimilarText(vocab1.EnglishText, vocab2.EnglishText) &&
+                              SimilarText(vocab1.JapaneseText, vocab2.JapaneseText),
+                "chinese" => SimilarText(vocab1.EnglishText, vocab2.EnglishText) &&
+                             SimilarText(vocab1.ChineseText, vocab2.ChineseText),
+                "tuvung" => SimilarText(vocab1.VietnameseText, vocab2.VietnameseText) &&
+                            SimilarText(vocab1.JapaneseText, vocab2.JapaneseText),
+                _ => false
+            };
+        }
+        private List<string> GetConflictFields(Vocabulary current, Vocabulary existing, string fileType)
+        {
+            var conflicts = new List<string>();
+
+            switch (fileType.ToLower())
+            {
+                case "english":
+                    if (!SimilarText(current.VietnameseText, existing.VietnameseText))
+                        conflicts.Add("Vietnamese");
+                    if (!SimilarText(current.EnglishText, existing.EnglishText))
+                        conflicts.Add("English");
+                    break;
+
+                case "japanese":
+                    if (!SimilarText(current.EnglishText, existing.EnglishText))
+                        conflicts.Add("English");
+                    if (!SimilarText(current.ReadingText, existing.ReadingText))
+                        conflicts.Add("Reading");
+                    if (!SimilarText(current.JapaneseText, existing.JapaneseText))
+                        conflicts.Add("Japanese");
+                    break;
+
+                case "chinese":
+                    if (!SimilarText(current.EnglishText, existing.EnglishText))
+                        conflicts.Add("English");
+                    if (!SimilarText(current.ReadingText, existing.ReadingText))
+                        conflicts.Add("Reading");
+                    if (!SimilarText(current.ChineseText, existing.ChineseText))
+                        conflicts.Add("Chinese");
+                    break;
+
+                case "tuvung":
+                    if (!SimilarText(current.VietnameseText, existing.VietnameseText))
+                        conflicts.Add("Vietnamese");
+                    if (!SimilarText(current.ReadingText, existing.ReadingText))
+                        conflicts.Add("Reading");
+                    if (!SimilarText(current.JapaneseText, existing.JapaneseText))
+                        conflicts.Add("Japanese");
+                    break;
+            }
+
+            return conflicts;
+        }
+
+
+        private async Task ExecuteAudioCreationActions(ExcelWorksheet worksheet, List<AudioProcessingInfo> processingResults, ProcessingOptions options, List<Task> audioTasks)
+        {
+            foreach (var info in processingResults)
+            {
+                if (!info.HasAudioFormulas)
+                {
+                    Console.WriteLine($"Row {info.RowNumber}: Skipping audio creation (no sound formulas)");
+                    continue;
+                }
+
+                switch (info.DuplicateResult.Action)
+                {
+                    case "Skip":
+                        string reason = info.DuplicateResult.MatchType == "Exact" ? "exact duplicate" : "duplicate in current session";
+                        Console.WriteLine($"Row {info.RowNumber}: SKIPPED - {reason}");
+                        break;
+
+                    case "RestoreAndUpdate":
+                        Console.WriteLine($"Row {info.RowNumber}: PARTIAL DUPLICATE - creating audio with old filenames");
+                        await CreateAudioForDatabaseDuplicate(worksheet, info.RowNumber, info.DuplicateResult.ExistingVocab, options, audioTasks);
+                        break;
+
+                    case "CreateNew":
+                    case "CreateNewConflict":
+                        string actionType = info.DuplicateResult.Action == "CreateNewConflict" ? "CONFLICT" : "NEW ENTRY";
+                        Console.WriteLine($"Row {info.RowNumber}: {actionType} - creating audio with new filenames");
+                        await CreateAudioForNewEntry(worksheet, info.RowNumber, options, audioTasks);
+                        break;
+                }
+            }
+        }
+
 
         // THÊM MỚI: Tạo audio cho database duplicate với tên file cũ
         private async Task CreateAudioForDatabaseDuplicate(ExcelWorksheet worksheet, int row, Vocabulary existingVocab, ProcessingOptions options, List<Task> audioTasks)
@@ -351,11 +506,11 @@ namespace Text_to_Image.Services
                     ExistingVocab = exactMatch,
                     DuplicateSource = "Database",
                     MatchType = "Exact",
-                    Action = "Skip" // THAY ĐỔI: EXACT duplicate KHÔNG tạo audio
+                    Action = "Skip" // EXACT duplicate KHÔNG tạo audio
                 };
             }
 
-            // CHECK 2: PARTIAL MATCH trong database
+            // CHECK 2: PARTIAL MATCH trong database  
             var partialMatch = FindPartialMatchInDatabase(currentVocab, existingVocabs, fileType);
             if (partialMatch != null)
             {
@@ -369,22 +524,92 @@ namespace Text_to_Image.Services
                 };
             }
 
-            // CHECK 3: Current session duplicates
-            var sessionDuplicate = FindExactOrPartialMatchInCurrentSession(currentVocab, processedInSession, fileType);
-            if (sessionDuplicate != null)
+            // CHECK 3: Current session exact duplicates
+            var sessionExactMatch = FindExactMatchInCurrentSession(currentVocab, processedInSession, fileType);
+            if (sessionExactMatch != null)
             {
                 return new DuplicateCheckResult
                 {
                     IsDuplicate = true,
-                    ExistingVocab = sessionDuplicate,
+                    ExistingVocab = sessionExactMatch,
                     DuplicateSource = "CurrentSession",
-                    Action = "Skip" // Không tạo audio
+                    MatchType = "Exact",
+                    Action = "Skip" // Session duplicate không tạo audio
+                };
+            }
+
+            // CHECK 4: Current session partial duplicates
+            var sessionPartialMatch = FindPartialMatchInCurrentSession(currentVocab, processedInSession, fileType);
+            if (sessionPartialMatch != null)
+            {
+                return new DuplicateCheckResult
+                {
+                    IsDuplicate = true,
+                    ExistingVocab = sessionPartialMatch,
+                    DuplicateSource = "CurrentSession",
+                    MatchType = "Partial",
+                    Action = "Skip" // Session duplicate không tạo audio
                 };
             }
 
             return new DuplicateCheckResult { IsDuplicate = false, Action = "CreateNew" };
         }
+        // THÊM 2 METHODS NÀY VÀO AzureSpeechService
+        private Vocabulary FindExactMatchInCurrentSession(Vocabulary currentVocab, List<Vocabulary> processedInSession, string fileType)
+        {
+            return fileType.ToLower() switch
+            {
+                "english" => processedInSession.FirstOrDefault(processed =>
+                    SimilarText(processed.VietnameseText, currentVocab.VietnameseText) &&
+                    SimilarText(processed.EnglishText, currentVocab.EnglishText)
+                ),
 
+                "japanese" => processedInSession.FirstOrDefault(processed =>
+                    SimilarText(processed.EnglishText, currentVocab.EnglishText) &&
+                    SimilarText(processed.JapaneseText, currentVocab.JapaneseText)
+                ),
+
+                "chinese" => processedInSession.FirstOrDefault(processed =>
+                    SimilarText(processed.EnglishText, currentVocab.EnglishText) &&
+                    SimilarText(processed.ChineseText, currentVocab.ChineseText)
+                ),
+
+                "tuvung" => processedInSession.FirstOrDefault(processed =>
+                    SimilarText(processed.VietnameseText, currentVocab.VietnameseText) &&
+                    SimilarText(processed.JapaneseText, currentVocab.JapaneseText)
+                ),
+
+                _ => null
+            };
+        }
+
+        private Vocabulary FindPartialMatchInCurrentSession(Vocabulary currentVocab, List<Vocabulary> processedInSession, string fileType)
+        {
+            return fileType.ToLower() switch
+            {
+                "english" => processedInSession.FirstOrDefault(processed =>
+                    SimilarText(processed.VietnameseText, currentVocab.VietnameseText) ||
+                    SimilarText(processed.EnglishText, currentVocab.EnglishText)
+                ),
+
+                "japanese" => processedInSession.FirstOrDefault(processed =>
+                    SimilarText(processed.EnglishText, currentVocab.EnglishText) ||
+                    SimilarText(processed.JapaneseText, currentVocab.JapaneseText)
+                ),
+
+                "chinese" => processedInSession.FirstOrDefault(processed =>
+                    SimilarText(processed.EnglishText, currentVocab.EnglishText) ||
+                    SimilarText(processed.ChineseText, currentVocab.ChineseText)
+                ),
+
+                "tuvung" => processedInSession.FirstOrDefault(processed =>
+                    SimilarText(processed.VietnameseText, currentVocab.VietnameseText) ||
+                    SimilarText(processed.JapaneseText, currentVocab.JapaneseText)
+                ),
+
+                _ => null
+            };
+        }
         // ORIGINAL METHOD: Check row có audio formulas không
         private bool CheckRowHasAudioFormulas(ExcelWorksheet worksheet, int row, ProcessingOptions options)
         {
@@ -719,6 +944,13 @@ namespace Text_to_Image.Services
             public string DuplicateSource { get; set; } // "Database" or "CurrentSession"
             public string MatchType { get; set; } = ""; // "Exact" or "Partial"  
             public string Action { get; set; } = ""; // "Skip", "RestoreAndUpdate", "Clear", "CreateNew"
+        }
+        public class AudioProcessingInfo
+        {
+            public Vocabulary Vocabulary { get; set; }
+            public DuplicateCheckResult DuplicateResult { get; set; }
+            public int RowNumber { get; set; }
+            public bool HasAudioFormulas { get; set; }
         }
     }
 }

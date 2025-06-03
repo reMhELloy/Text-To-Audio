@@ -20,15 +20,23 @@ namespace Text_to_Image.Data
             _context.Database.EnsureCreated();
         }
 
+        // THÊM DEBUG VÀO SaveExcelDataToDatabaseAsync METHOD
+
         public async Task<ProcessingSession> SaveExcelDataToDatabaseAsync(ProcessingOptions options)
         {
             try
             {
-                Console.WriteLine("Saving Excel data to SQL Server with UPSERT logic...");
+                Console.WriteLine("=== DEBUG: Starting SaveExcelDataToDatabaseAsync ===");
+                Console.WriteLine($"Selected file: {options.SelectedFile}");
+                Console.WriteLine($"Custom date: {options.CustomDate}");
 
                 string dateToUse = options.CustomDate ?? DateTime.Now.ToString("dd-MM-yyyy");
                 DateTime targetDate = DateTime.ParseExact(dateToUse, "dd-MM-yyyy", null);
 
+                Console.WriteLine($"Date to use: {dateToUse}");
+                Console.WriteLine($"Target date: {targetDate}");
+
+                // CREATE SESSION
                 var session = new ProcessingSession
                 {
                     FileName = Path.GetFileName(options.SelectedFile),
@@ -40,99 +48,171 @@ namespace Text_to_Image.Data
                     UpdatedRows = 0
                 };
 
+                Console.WriteLine($"Session created: FileType={session.FileType}");
+
                 _context.ProcessingSessions.Add(session);
                 await _context.SaveChangesAsync();
+                Console.WriteLine($"Session saved with ID: {session.SessionId}");
 
-                // ĐỌC TẤT CẢ DỮ LIỆU TỪ EXCEL
+                // READ EXCEL DATA
+                Console.WriteLine("=== DEBUG: Reading Excel data ===");
                 var allVocabsFromExcel = await ProcessExcelWithUpsertLogic(options, session.SessionId, targetDate);
+                Console.WriteLine($"Read {allVocabsFromExcel.Count} vocabularies from Excel");
 
-                // LẤY EXISTING DATA TỪ DATABASE  
+                // GET EXISTING DATA
+                Console.WriteLine("=== DEBUG: Getting existing data ===");
                 var existingVocabs = await GetExistingVocabulariesForDateAsync(dateToUse, session.FileType);
-
-                Console.WriteLine($"Found {allVocabsFromExcel.Count} rows in Excel");
                 Console.WriteLine($"Found {existingVocabs.Count} existing vocabularies in database");
 
+                // DEBUG: Print existing vocab details
+                foreach (var existing in existingVocabs)
+                {
+                    Console.WriteLine($"  Existing: VocabId={existing.VocabId}, VI='{existing.VietnameseText}', EN='{existing.EnglishText}'");
+                }
+
+                // PROCESS EACH VOCABULARY
+                Console.WriteLine("=== DEBUG: Processing vocabularies ===");
                 int newCount = 0, updateCount = 0, skipCount = 0;
                 var newVocabularies = new List<Vocabulary>();
                 var updatedVocabularies = new List<Vocabulary>();
 
                 foreach (var currentVocab in allVocabsFromExcel)
                 {
+                    Console.WriteLine($"\n--- Processing vocab: VI='{currentVocab.VietnameseText}', EN='{currentVocab.EnglishText}' ---");
+
                     var duplicateResult = CheckVocabularyForDuplicate(currentVocab, existingVocabs, session.FileType);
+
+                    Console.WriteLine($"Duplicate check result: IsDuplicate={duplicateResult.IsDuplicate}, Action={duplicateResult.Action}");
+
+                    if (duplicateResult.ExistingVocab != null)
+                    {
+                        Console.WriteLine($"  Matched with existing VocabId={duplicateResult.ExistingVocab.VocabId}");
+                    }
 
                     switch (duplicateResult.Action)
                     {
                         case "Skip":
                             skipCount++;
-                            Console.WriteLine($"SKIPPED: {GetPrimaryText(currentVocab, session.FileType)}");
+                            Console.WriteLine($"  SKIPPED: {GetPrimaryText(currentVocab, session.FileType)}");
                             break;
 
                         case "Update":
                             await UpdateExistingVocabulary(duplicateResult.ExistingVocab, currentVocab, options, dateToUse, targetDate);
                             updatedVocabularies.Add(duplicateResult.ExistingVocab);
                             updateCount++;
-                            Console.WriteLine($"UPDATED: {GetPrimaryText(currentVocab, session.FileType)}");
+                            Console.WriteLine($"  UPDATED: {GetPrimaryText(currentVocab, session.FileType)}");
                             break;
 
                         case "Insert":
-                            // KHÔNG THÊM VÀO CONTEXT NGAY, CHỜ SAVE TRƯỚC
                             newVocabularies.Add(currentVocab);
                             newCount++;
-                            Console.WriteLine($"WILL INSERT: {GetPrimaryText(currentVocab, session.FileType)}");
+                            Console.WriteLine($"  WILL INSERT: {GetPrimaryText(currentVocab, session.FileType)}");
                             break;
                     }
                 }
 
-                // SAVE NEW VOCABULARIES TRƯỚC
+                Console.WriteLine($"\n=== DEBUG: Summary before save ===");
+                Console.WriteLine($"New vocabularies to insert: {newVocabularies.Count}");
+                Console.WriteLine($"Existing vocabularies to update: {updatedVocabularies.Count}");
+                Console.WriteLine($"Vocabularies to skip: {skipCount}");
+
+                // SAVE NEW VOCABULARIES
                 if (newVocabularies.Any())
                 {
-                    _context.Vocabularies.AddRange(newVocabularies);
-                    await _context.SaveChangesAsync(); // SAVE để có VocabId
-                    Console.WriteLine($"Saved {newVocabularies.Count} NEW vocabularies to database.");
+                    Console.WriteLine("=== DEBUG: Saving new vocabularies ===");
+                    try
+                    {
+                        _context.Vocabularies.AddRange(newVocabularies);
+                        await _context.SaveChangesAsync();
+                        Console.WriteLine($"✓ Successfully saved {newVocabularies.Count} NEW vocabularies");
+
+                        // Print new VocabIds
+                        foreach (var newVocab in newVocabularies)
+                        {
+                            Console.WriteLine($"  New VocabId: {newVocab.VocabId} - {GetPrimaryText(newVocab, session.FileType)}");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"✗ Error saving new vocabularies: {ex.Message}");
+                        throw;
+                    }
+                }
+                else
+                {
+                    Console.WriteLine("No new vocabularies to save");
                 }
 
-                // SAVE UPDATED VOCABULARIES  
+                // SAVE UPDATED VOCABULARIES
                 if (updatedVocabularies.Any())
                 {
-                    await _context.SaveChangesAsync(); // SAVE updated ones
-                    Console.WriteLine($"Updated {updatedVocabularies.Count} existing vocabularies.");
+                    Console.WriteLine("=== DEBUG: Saving updated vocabularies ===");
+                    try
+                    {
+                        await _context.SaveChangesAsync();
+                        Console.WriteLine($"✓ Successfully updated {updatedVocabularies.Count} existing vocabularies");
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"✗ Error updating vocabularies: {ex.Message}");
+                        throw;
+                    }
+                }
+                else
+                {
+                    Console.WriteLine("No vocabularies to update");
                 }
 
-                // BÂY GIỜ TẠO AUDIO FILES VỚI VocabId VALID
+                // CREATE AUDIO FILES
+                Console.WriteLine("=== DEBUG: Creating audio file records ===");
                 if (options.CreateAudioFiles && !string.IsNullOrWhiteSpace(options.SoundColumns))
                 {
                     var allVocabsForAudio = newVocabularies.Concat(updatedVocabularies).ToList();
+                    Console.WriteLine($"Creating audio files for {allVocabsForAudio.Count} vocabularies");
+
                     if (allVocabsForAudio.Any())
                     {
                         var audioFiles = CreateAudioFileRecordsFromVocabularies(allVocabsForAudio, options, targetDate);
+                        Console.WriteLine($"Created {audioFiles.Count} audio file records");
+
                         if (audioFiles.Any())
                         {
                             _context.AudioFiles.AddRange(audioFiles);
                             await _context.SaveChangesAsync();
                             session.AudioFilesCreated = audioFiles.Count;
-                            Console.WriteLine($"Created {audioFiles.Count} audio file records.");
+                            Console.WriteLine($"✓ Saved {audioFiles.Count} audio file records to database");
                         }
                     }
                 }
+                else
+                {
+                    Console.WriteLine("Audio file creation skipped (not enabled or no sound columns)");
+                }
 
-                // UPDATE SESSION STATS
+                // UPDATE SESSION
                 session.ProcessedRows = newCount;
                 session.UpdatedRows = updateCount;
                 session.TotalRows = allVocabsFromExcel.Count;
                 session.IsCompleted = true;
                 await _context.SaveChangesAsync();
 
-                Console.WriteLine("Excel data successfully saved to SQL Server!");
+                Console.WriteLine("=== DEBUG: Final results ===");
                 Console.WriteLine($"NEW entries: {newCount}");
                 Console.WriteLine($"UPDATED entries: {updateCount}");
                 Console.WriteLine($"SKIPPED entries: {skipCount}");
+                Console.WriteLine("=== DEBUG: SaveExcelDataToDatabaseAsync completed ===");
 
                 return session;
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error saving to database: {ex.Message}");
-                Console.WriteLine($"Inner exception: {ex.InnerException?.Message}");
+                Console.WriteLine($"=== DEBUG: ERROR in SaveExcelDataToDatabaseAsync ===");
+                Console.WriteLine($"Error: {ex.Message}");
+                Console.WriteLine($"Stack trace: {ex.StackTrace}");
+                if (ex.InnerException != null)
+                {
+                    Console.WriteLine($"Inner exception: {ex.InnerException.Message}");
+                }
                 throw;
             }
         }

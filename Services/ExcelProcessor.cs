@@ -78,7 +78,6 @@ namespace Text_to_Image.Services
             try
             {
                 RemoveDuplicateRows(options.SelectedFile, options);
-                Console.WriteLine("Processing Excel file with database integration...");
 
                 string dateToUse = string.IsNullOrWhiteSpace(options.CustomDate) ?
                     DateTime.Now.ToString("dd-MM-yyyy") : options.CustomDate;
@@ -97,7 +96,6 @@ namespace Text_to_Image.Services
 
                     var existingSummary = await dbService.GetExistingDataSummary(dateToUse, fileType, audioFileType);
                     existingAudioCount = existingSummary.AudioFileCount;
-
                     existingVocabs = await dbService.GetExistingVocabulariesForDateAsync(dateToUse, fileType);
 
                     Console.WriteLine("Database Check Results:");
@@ -126,90 +124,63 @@ namespace Text_to_Image.Services
                     }
 
                     Console.WriteLine($"Excel file has {rowCount} rows.");
-                    Console.WriteLine("Starting processing with UPDATE for duplicates...");
+                    Console.WriteLine("Starting processing with conflict resolution logic...");
 
                     int currentAudioNumber = existingAudioCount + 1;
                     var processedRows = new List<Vocabulary>();
+                    var processingResults = new List<VocabularyProcessingInfo>();
 
+                    // PHASE 1: Collect processing info
+                    Console.WriteLine("PHASE 1: Collecting processing information...");
                     for (int row = 1; row <= rowCount; row++)
                     {
-                        // Duplicate check với logic mới
+                        var currentVocab = CreateVocabularyFromRow(worksheet, row, options);
                         var duplicateResult = CheckRowForDuplicate(worksheet, row, existingVocabs, processedRows, options);
 
-                        // Text conversion (luôn làm, trừ khi row bị xóa)
-                        if (duplicateResult.Action != "Skip" &&
-                            !string.IsNullOrWhiteSpace(options.ColumnInput) &&
-                            options.ColumnInput.Length >= 1 &&
-                            !options.FileName.Contains("english"))
+                        var processingInfo = new VocabularyProcessingInfo
                         {
-                            int inputColumn = options.ColumnInput[0] - 'A' + 1;
-                            string inputText = worksheet.Cells[row, inputColumn].Text;
+                            Vocabulary = currentVocab,
+                            DuplicateResult = duplicateResult,
+                            RowNumber = row,
+                            HasSoundFormulas = HasSoundFormulas(worksheet, row, options)
+                        };
 
-                            if (!string.IsNullOrEmpty(inputText))
-                            {
-                                string convertedText = TextConverter.ConvertToImgTags(inputText);
-                                int outputColumn = 7;
-                                worksheet.Cells[row, outputColumn].Value = convertedText;
-                            }
-                        }
+                        processingResults.Add(processingInfo);
 
-                        // Sound formulas processing với logic mới
-                        if (!string.IsNullOrWhiteSpace(options.SoundColumns))
+                        // Track initial CreateNew entries for session duplicate checking
+                        if (duplicateResult.Action == "CreateNew")
                         {
-                            switch (duplicateResult.Action)
-                            {
-                                case "Skip":
-                                    // EXACT DUPLICATE - XÓA TOÀN BỘ ROW
-                                    ClearEntireRow(worksheet, row);
-                                    Console.WriteLine($"Row {row}: EXACT DUPLICATE - DELETED entire row (no formulas, no sound)");
-                                    break;
-
-                                case "RestoreAndUpdate":
-                                    // PARTIAL DUPLICATE - restore old formulas, sẽ tạo sound với tên file cũ
-                                    await RestoreOldSoundFormulas(worksheet, row, duplicateResult.ExistingVocab, options, dateToUse);
-                                    Console.WriteLine($"Row {row}: PARTIAL DUPLICATE - RESTORED old formulas (will create sound with old filenames)");
-                                    break;
-
-                                case "Clear":
-                                    // CURRENT SESSION DUPLICATE - clear formulas
-                                    ClearSoundFormulas(worksheet, row, options);
-                                    Console.WriteLine($"Row {row}: SESSION DUPLICATE - CLEARED formulas");
-                                    break;
-
-                                case "CreateNew":
-                                    // NEW ENTRY - tạo formulas mới
-                                    ProcessSoundFormulas(worksheet, row, options, dateToUse, currentAudioNumber);
-
-                                    var currentVocab = CreateVocabularyFromRow(worksheet, row, options);
-                                    processedRows.Add(currentVocab);
-
-                                    Console.WriteLine($"Row {row}: NEW ENTRY - Created formulas {currentAudioNumber} & {currentAudioNumber + 1}");
-                                    currentAudioNumber += 2;
-                                    break;
-                            }
-                        }
-
-                        // Kanji processing (luôn làm) - NHƯNG SKIP NẾU ROW ĐÃ BỊ XÓA
-                        if (duplicateResult.Action != "Skip" &&
-                            !string.IsNullOrWhiteSpace(options.KanjiColumn) &&
-                            options.KanjiColumn.Length >= 1 &&
-                            !options.FileName.Contains("english") &&
-                            (options.FileName.Contains("tuvung") ||
-                             options.FileName.Contains("japanese") ||
-                             options.FileName.Contains("chinese")))
-                        {
-                            ProcessKanjiFormatting(worksheet, row, options);
+                            processedRows.Add(currentVocab);
                         }
                     }
 
+                    // PHASE 2: Apply conflict resolution logic
+                    Console.WriteLine("PHASE 2: Applying conflict resolution logic...");
+                    ApplyConflictResolutionLogic(processingResults, existingVocabs, options);
+
+                    // PHASE 2.5: Track additional entries that became CreateNewConflict
+                    Console.WriteLine("PHASE 2.5: Updating processed rows tracking...");
+                    foreach (var info in processingResults)
+                    {
+                        if (info.DuplicateResult.Action == "CreateNewConflict" &&
+                            !processedRows.Any(p => SimilarVocabulary(p, info.Vocabulary, DetermineFileType(options.FileName))))
+                        {
+                            processedRows.Add(info.Vocabulary);
+                        }
+                    }
+
+                    // PHASE 3: Execute actions based on processing results
+                    Console.WriteLine("PHASE 3: Executing processing actions...");
+                    await ExecuteProcessingActions(worksheet, processingResults, options, dateToUse, currentAudioNumber);
+
+                    // PHASE 4: Compact and save
+                    Console.WriteLine("PHASE 4: Compacting worksheet and saving...");
                     try
                     {
-                        Console.WriteLine("Compacting worksheet - removing empty rows...");
                         CompactWorksheet(worksheet);
-
                         package.Save();
                         Console.WriteLine($"Completed! Processed {rowCount} rows.");
-                        ShowProcessingSummary(options);
+                        ShowProcessingSummary(options, processingResults);
 
                         Console.Write("Open Processed Excel File? (Y/N): ");
                         string openAnswer = Console.ReadLine().Trim().ToUpper();
@@ -229,6 +200,223 @@ namespace Text_to_Image.Services
                 Console.WriteLine($"Error processing file: {ex.Message}");
                 throw;
             }
+        }
+        private static void ApplyConflictResolutionLogic(List<VocabularyProcessingInfo> processingResults,
+    List<Vocabulary> existingVocabs, ProcessingOptions options)
+        {
+            string fileType = DetermineFileType(options.FileName);
+
+            // Group rows by their conflict target (which existing vocab they conflict with)
+            var conflictGroups = new Dictionary<int, List<VocabularyProcessingInfo>>();
+
+            foreach (var info in processingResults)
+            {
+                if (info.DuplicateResult.IsDuplicate &&
+                    info.DuplicateResult.MatchType == "Partial" &&
+                    info.DuplicateResult.DuplicateSource == "Database")
+                {
+                    int existingVocabId = info.DuplicateResult.ExistingVocab.VocabId;
+
+                    if (!conflictGroups.ContainsKey(existingVocabId))
+                        conflictGroups[existingVocabId] = new List<VocabularyProcessingInfo>();
+
+                    conflictGroups[existingVocabId].Add(info);
+                }
+            }
+
+            // Apply conflict resolution rules
+            foreach (var group in conflictGroups.Values)
+            {
+                if (group.Count > 1)
+                {
+                    // Sort by row number to ensure consistent ordering
+                    group.Sort((a, b) => a.RowNumber.CompareTo(b.RowNumber));
+
+                    for (int i = 0; i < group.Count; i++)
+                    {
+                        var info = group[i];
+                        var conflicts = DetectDataConflicts(info.Vocabulary, info.DuplicateResult.ExistingVocab, fileType);
+
+                        if (i == 0)
+                        {
+                            // FIRST ROW: RESTORE old audio
+                            info.DuplicateResult.Action = "RestoreAndUpdate";
+                            info.DuplicateResult.IsFirstConflictRow = true;
+                            info.DuplicateResult.ConflictFields = conflicts;
+                        }
+                        else
+                        {
+                            // SUBSEQUENT ROWS: CREATE new audio
+                            info.DuplicateResult.Action = "CreateNewConflict";
+                            info.DuplicateResult.ConflictFields = conflicts;
+                        }
+                    }
+                }
+                else if (group.Count == 1)
+                {
+                    // Single partial match
+                    var info = group[0];
+                    var conflicts = DetectDataConflicts(info.Vocabulary, info.DuplicateResult.ExistingVocab, fileType);
+                    info.DuplicateResult.ConflictFields = conflicts;
+                }
+            }
+        }
+        private static List<string> DetectDataConflicts(Vocabulary currentVocab, Vocabulary existingVocab, string fileType)
+        {
+            var conflicts = new List<string>();
+
+            bool HasConflict(string current, string existing, string fieldName)
+            {
+                if (!string.IsNullOrWhiteSpace(current) && !string.IsNullOrWhiteSpace(existing))
+                {
+                    if (!SimilarText(current, existing))
+                    {
+                        conflicts.Add(fieldName);
+                        return true;
+                    }
+                }
+                return false;
+            }
+
+            switch (fileType.ToLower())
+            {
+                case "english":
+                    HasConflict(currentVocab.VietnameseText, existingVocab.VietnameseText, "Vietnamese");
+                    HasConflict(currentVocab.EnglishText, existingVocab.EnglishText, "English");
+                    break;
+                case "japanese":
+                    HasConflict(currentVocab.EnglishText, existingVocab.EnglishText, "English");
+                    HasConflict(currentVocab.JapaneseText, existingVocab.JapaneseText, "Japanese");
+                    HasConflict(currentVocab.ReadingText, existingVocab.ReadingText, "Reading");
+                    break;
+                case "chinese":
+                    HasConflict(currentVocab.EnglishText, existingVocab.EnglishText, "English");
+                    HasConflict(currentVocab.ChineseText, existingVocab.ChineseText, "Chinese");
+                    HasConflict(currentVocab.ReadingText, existingVocab.ReadingText, "Reading");
+                    break;
+                case "tuvung":
+                    HasConflict(currentVocab.VietnameseText, existingVocab.VietnameseText, "Vietnamese");
+                    HasConflict(currentVocab.JapaneseText, existingVocab.JapaneseText, "Japanese");
+                    HasConflict(currentVocab.ReadingText, existingVocab.ReadingText, "Reading");
+                    break;
+            }
+
+            return conflicts;
+        }
+        private static async Task ExecuteProcessingActions(ExcelWorksheet worksheet, List<VocabularyProcessingInfo> processingResults,
+    ProcessingOptions options, string dateToUse, int startingAudioNumber)
+        {
+            int currentAudioNumber = startingAudioNumber;
+
+            foreach (var info in processingResults)
+            {
+                int row = info.RowNumber;
+                var duplicateResult = info.DuplicateResult;
+
+                // Text conversion
+                if (duplicateResult.Action != "Skip" &&
+                    !string.IsNullOrWhiteSpace(options.ColumnInput) &&
+                    options.ColumnInput.Length >= 1 &&
+                    !options.FileName.Contains("english"))
+                {
+                    int inputColumn = options.ColumnInput[0] - 'A' + 1;
+                    string inputText = worksheet.Cells[row, inputColumn].Text;
+
+                    if (!string.IsNullOrEmpty(inputText))
+                    {
+                        string convertedText = TextConverter.ConvertToImgTags(inputText);
+                        int outputColumn = 7;
+                        worksheet.Cells[row, outputColumn].Value = convertedText;
+                    }
+                }
+
+                // Sound formulas processing
+                if (!string.IsNullOrWhiteSpace(options.SoundColumns))
+                {
+                    switch (duplicateResult.Action)
+                    {
+                        case "Skip":
+                            ClearEntireRow(worksheet, row);
+                            Console.WriteLine($"Row {row}: EXACT DUPLICATE - DELETED");
+                            break;
+
+                        case "RestoreAndUpdate":
+                            await RestoreOldSoundFormulas(worksheet, row, duplicateResult.ExistingVocab, options, dateToUse);
+                            if (duplicateResult.ConflictFields.Any())
+                            {
+                                string conflictFields = string.Join(", ", duplicateResult.ConflictFields);
+                                string orderInfo = duplicateResult.IsFirstConflictRow ? " (FIRST)" : "";
+                                Console.WriteLine($"Row {row}: CONFLICT{orderInfo} in [{conflictFields}] - RESTORED old audio");
+                            }
+                            else
+                            {
+                                Console.WriteLine($"Row {row}: PARTIAL DUPLICATE - RESTORED old audio");
+                            }
+                            break;
+
+                        case "Clear":
+                            ClearSoundFormulas(worksheet, row, options);
+                            Console.WriteLine($"Row {row}: SESSION DUPLICATE - CLEARED");
+                            break;
+
+                        case "CreateNew":
+                            ProcessSoundFormulas(worksheet, row, options, dateToUse, currentAudioNumber);
+                            Console.WriteLine($"Row {row}: NEW ENTRY - Created audio {currentAudioNumber} & {currentAudioNumber + 1}");
+                            currentAudioNumber += 2;
+                            break;
+
+                        case "CreateNewConflict":
+                            ProcessSoundFormulas(worksheet, row, options, dateToUse, currentAudioNumber);
+                            string conflictInfo = string.Join(", ", duplicateResult.ConflictFields);
+                            Console.WriteLine($"Row {row}: CONFLICT (SUBSEQUENT) in [{conflictInfo}] - Created NEW audio {currentAudioNumber} & {currentAudioNumber + 1}");
+                            currentAudioNumber += 2;
+                            break;
+                    }
+                }
+
+                // Kanji processing
+                if (duplicateResult.Action != "Skip" &&
+                    !string.IsNullOrWhiteSpace(options.KanjiColumn) &&
+                    options.KanjiColumn.Length >= 1 &&
+                    !options.FileName.Contains("english") &&
+                    (options.FileName.Contains("tuvung") ||
+                     options.FileName.Contains("japanese") ||
+                     options.FileName.Contains("chinese")))
+                {
+                    ProcessKanjiFormatting(worksheet, row, options);
+                }
+            }
+        }
+        private static bool HasSoundFormulas(ExcelWorksheet worksheet, int row, ProcessingOptions options)
+        {
+            if (string.IsNullOrWhiteSpace(options.SoundColumns)) return false;
+
+            if ((options.FileName.Contains("tuvung") ||
+                 options.FileName.Contains("japanese") ||
+                 options.FileName.Contains("chinese")) && options.SoundColumns.Length == 2)
+            {
+                string col1Value = worksheet.Cells[row, 5].Text?.Trim();
+                string col2Value = worksheet.Cells[row, 6].Text?.Trim();
+                return !string.IsNullOrEmpty(col1Value) && !string.IsNullOrEmpty(col2Value) &&
+                       col1Value.Contains("[sound:") && col2Value.Contains("[sound:");
+            }
+            else if (options.FileName.Contains("english") && options.SoundColumns.Length == 2)
+            {
+                int soundCol1 = options.SoundColumns[0] - 'A' + 1;
+                int soundCol2 = options.SoundColumns[1] - 'A' + 1;
+                string col1Value = worksheet.Cells[row, soundCol1].Text?.Trim();
+                string col2Value = worksheet.Cells[row, soundCol2].Text?.Trim();
+                return !string.IsNullOrEmpty(col1Value) && !string.IsNullOrEmpty(col2Value) &&
+                       col1Value.Contains("[sound:") && col2Value.Contains("[sound:");
+            }
+            else if (options.SoundColumns.Length == 1)
+            {
+                int soundCol = options.SoundColumns[0] - 'A' + 1;
+                string colValue = worksheet.Cells[row, soundCol].Text?.Trim();
+                return !string.IsNullOrEmpty(colValue) && colValue.Contains("[sound:");
+            }
+
+            return false;
         }
         private static void ClearEntireRow(ExcelWorksheet worksheet, int row)
         {
@@ -753,39 +941,53 @@ namespace Text_to_Image.Services
 
             return "";
         }
-
-
-    private static void ShowProcessingSummary(ProcessingOptions options)
-    {
-    if (!string.IsNullOrWhiteSpace(options.ColumnInput) && !options.FileName.Contains("english"))
-    {
-        Console.WriteLine($"- <img>: done | {options.ColumnInput[0]} -> G");
-    }
-
-    if (!string.IsNullOrWhiteSpace(options.SoundColumns))
-    {
-        if ((options.FileName.Contains("tuvung") ||
-             options.FileName.Contains("japanese") ||
-             options.FileName.Contains("chinese")) &&
-            options.SoundColumns.Length == 2)
+        private static bool SimilarVocabulary(Vocabulary vocab1, Vocabulary vocab2, string fileType)
         {
-            Console.WriteLine("- [sound]: done | E & F");
-            Console.WriteLine("  * Exact duplicates: SKIPPED (no formulas, no audio)");
-            Console.WriteLine("  * Partial duplicates: RESTORED old formulas (audio with old filenames)");
-            Console.WriteLine("  * New entries: CREATED new formulas (audio with new filenames)");
+            return fileType.ToLower() switch
+            {
+                "english" => SimilarText(vocab1.VietnameseText, vocab2.VietnameseText) &&
+                             SimilarText(vocab1.EnglishText, vocab2.EnglishText),
+                "japanese" => SimilarText(vocab1.EnglishText, vocab2.EnglishText) &&
+                              SimilarText(vocab1.JapaneseText, vocab2.JapaneseText),
+                "chinese" => SimilarText(vocab1.EnglishText, vocab2.EnglishText) &&
+                             SimilarText(vocab1.ChineseText, vocab2.ChineseText),
+                "tuvung" => SimilarText(vocab1.VietnameseText, vocab2.VietnameseText) &&
+                            SimilarText(vocab1.JapaneseText, vocab2.JapaneseText),
+                _ => false
+            };
         }
-        else
-        {
-            Console.WriteLine($"- [sound]: done | {options.SoundColumns}");
-            Console.WriteLine("  * Exact duplicates: SKIPPED");
-            Console.WriteLine("  * Partial duplicates: RESTORED old formulas");
-            Console.WriteLine("  * New entries: CREATED new formulas");
-        }
-    }
 
-    if (!string.IsNullOrWhiteSpace(options.KanjiColumn))
-        Console.WriteLine($"- kanji: done | {options.KanjiColumn}");
-}
+        private static void ShowProcessingSummary(ProcessingOptions options, List<VocabularyProcessingInfo> processingResults)
+        {
+            if (!string.IsNullOrWhiteSpace(options.ColumnInput) && !options.FileName.Contains("english"))
+            {
+                Console.WriteLine($"- <img>: done | {options.ColumnInput[0]} -> G");
+            }
+
+            if (!string.IsNullOrWhiteSpace(options.SoundColumns))
+            {
+                var actionCounts = processingResults
+                    .GroupBy(p => p.DuplicateResult.Action)
+                    .ToDictionary(g => g.Key, g => g.Count());
+
+                Console.WriteLine("- [sound]: Processing completed");
+                Console.WriteLine("  Results:");
+
+                if (actionCounts.ContainsKey("Skip"))
+                    Console.WriteLine($"    * EXACT DUPLICATES (deleted): {actionCounts["Skip"]}");
+                if (actionCounts.ContainsKey("RestoreAndUpdate"))
+                    Console.WriteLine($"    * RESTORED old audio: {actionCounts["RestoreAndUpdate"]}");
+                if (actionCounts.ContainsKey("CreateNew"))
+                    Console.WriteLine($"    * NEW ENTRIES: {actionCounts["CreateNew"]}");
+                if (actionCounts.ContainsKey("CreateNewConflict"))
+                    Console.WriteLine($"    * CONFLICT ROWS (new audio): {actionCounts["CreateNewConflict"]}");
+                if (actionCounts.ContainsKey("Clear"))
+                    Console.WriteLine($"    * SESSION DUPLICATES (cleared): {actionCounts["Clear"]}");
+            }
+
+            if (!string.IsNullOrWhiteSpace(options.KanjiColumn))
+                Console.WriteLine($"- kanji: done | {options.KanjiColumn}");
+        }
 
         private static string DetermineFileType(string fileName)
         {
@@ -822,11 +1024,19 @@ namespace Text_to_Image.Services
         {
             public bool IsDuplicate { get; set; }
             public Vocabulary ExistingVocab { get; set; }
-            public string DuplicateSource { get; set; } // "Database" or "CurrentSession"
+            public string DuplicateSource { get; set; } = ""; // "Database" or "CurrentSession"
             public string MatchType { get; set; } = ""; // "Exact" or "Partial"  
-            public string Action { get; set; } = ""; // "Skip", "RestoreAndUpdate", "Clear", "CreateNew"
+            public string Action { get; set; } = ""; // "Skip", "RestoreAndUpdate", "Clear", "CreateNew", "CreateNewConflict"
+            public List<string> ConflictFields { get; set; } = new List<string>(); // THÊM MỚI
+            public bool IsFirstConflictRow { get; set; } = false; // THÊM MỚI
         }
-
+        public class VocabularyProcessingInfo
+        {
+            public Vocabulary Vocabulary { get; set; }
+            public DuplicateCheckResult DuplicateResult { get; set; }
+            public int RowNumber { get; set; }
+            public bool HasSoundFormulas { get; set; }
+        }
         // CÁC METHODS KHÁC GIỮ NGUYÊN...
         public static System.Diagnostics.Process OpenExcelFile(string filePath)
         {
