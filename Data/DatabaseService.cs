@@ -28,7 +28,6 @@ namespace Text_to_Image.Data
                 DateTime targetDate = DateTime.ParseExact(dateToUse, "dd-MM-yyyy", null);
                 var fileType = DetermineFileType(options.FileName);
 
-
                 // CREATE SESSION
                 var session = new ProcessingSession
                 {
@@ -55,7 +54,6 @@ namespace Text_to_Image.Data
 
                 foreach (var currentVocab in allVocabsFromExcel)
                 {
-
                     var duplicateResult = CheckVocabularyForDuplicate(currentVocab, existingVocabs, session.FileType);
 
                     switch (duplicateResult.Action)
@@ -74,27 +72,48 @@ namespace Text_to_Image.Data
                             break;
                     }
                 }
+
                 // Batch save all vocabulary changes
                 if (newVocabularies.Any())
                 {
                     _context.Vocabularies.AddRange(newVocabularies);
                 }
+
                 // Single save for all vocabulary operations
                 if (newVocabularies.Any() || updatedVocabularies.Any())
                 {
                     await _context.SaveChangesAsync();
                 }
-                // Create and save audio files if needed
+
+                // ✅ FIX: CENTRALIZED AUDIO PROCESSING (chỉ 1 lần, xử lý đúng)
                 if (options.CreateAudioFiles && !string.IsNullOrWhiteSpace(options.SoundColumns))
                 {
-                    var allVocabsForAudio = newVocabularies.Concat(updatedVocabularies);
-                    var audioFiles = CreateAudioFileRecordsFromVocabularies(allVocabsForAudio.ToList(), options, targetDate);
+                    Console.WriteLine($"=== CENTRALIZED AUDIO PROCESSING ===");
+                    Console.WriteLine($"New vocabularies: {newVocabularies.Count}");
+                    Console.WriteLine($"Updated vocabularies: {updatedVocabularies.Count}");
 
-                    if (audioFiles.Any())
+                    int audioFilesCreated = 0;
+
+                    // STEP 1: Handle UPDATED vocabularies (update existing audio files)
+                    foreach (var updatedVocab in updatedVocabularies)
                     {
-                        _context.AudioFiles.AddRange(audioFiles);
-                        session.AudioFilesCreated = audioFiles.Count;
+                        await UpdateExistingAudioFiles(updatedVocab, options, targetDate, dateToUse);
+                        audioFilesCreated += 2;
                     }
+
+                    // STEP 2: Handle NEW vocabularies (create new audio files)
+                    if (newVocabularies.Any())
+                    {
+                        var audioFiles = CreateAudioFileRecordsFromVocabularies(newVocabularies, options, targetDate);
+                        if (audioFiles.Any())
+                        {
+                            _context.AudioFiles.AddRange(audioFiles);
+                            audioFilesCreated += audioFiles.Count;
+                        }
+                    }
+
+                    session.AudioFilesCreated = audioFilesCreated;
+                    Console.WriteLine($"Total audio files processed: {audioFilesCreated}");
                 }
 
                 // Final session update and save
@@ -105,12 +124,128 @@ namespace Text_to_Image.Data
                 await _context.SaveChangesAsync();
 
                 return session;
-
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"Database save error: {ex.Message}");
                 throw;
+            }
+        }
+        private async Task UpdateExistingAudioFiles(Vocabulary existingVocab, ProcessingOptions options, DateTime targetDate, string dateToUse)
+        {
+            try
+            {
+                Console.WriteLine($"Updating audio files for VocabId {existingVocab.VocabId}");
+
+                // GET EXISTING AUDIO FILES
+                var existingAudioFiles = await _context.AudioFiles
+                    .Where(a => a.VocabId == existingVocab.VocabId)
+                    .OrderBy(a => a.IsOddFile ? 0 : 1)
+                    .ToListAsync();
+
+                Console.WriteLine($"Found {existingAudioFiles.Count} existing audio files");
+
+                if (existingAudioFiles.Count >= 2)
+                {
+                    // ✅ UPDATE EXISTING AUDIO FILES (keep filename, update metadata)
+                    var oddFile = existingAudioFiles.FirstOrDefault(a => a.IsOddFile);
+                    var evenFile = existingAudioFiles.FirstOrDefault(a => !a.IsOddFile);
+
+                    if (oddFile != null)
+                    {
+                        oddFile.CreatedDate = targetDate;
+                        oddFile.IsGenerated = false; // Mark for regeneration
+                        _context.Entry(oddFile).State = EntityState.Modified;
+                        Console.WriteLine($"✅ Updated audio file: {oddFile.FileName}");
+                    }
+
+                    if (evenFile != null)
+                    {
+                        evenFile.CreatedDate = targetDate;
+                        evenFile.IsGenerated = false;
+                        _context.Entry(evenFile).State = EntityState.Modified;
+                        Console.WriteLine($"✅ Updated audio file: {evenFile.FileName}");
+                    }
+
+                    // ✅ REMOVE DUPLICATE AUDIO FILES (if more than 2)
+                    if (existingAudioFiles.Count > 2)
+                    {
+                        var extraFiles = existingAudioFiles.Skip(2).ToList();
+                        _context.AudioFiles.RemoveRange(extraFiles);
+                        Console.WriteLine($"🗑️ Removed {extraFiles.Count} duplicate audio files");
+                    }
+                }
+                else
+                {
+                    Console.WriteLine($"⚠️ VocabId {existingVocab.VocabId} has insufficient audio files ({existingAudioFiles.Count}), will create new ones");
+
+                    // Delete existing incomplete set
+                    if (existingAudioFiles.Any())
+                    {
+                        _context.AudioFiles.RemoveRange(existingAudioFiles);
+                        Console.WriteLine($"🗑️ Removed {existingAudioFiles.Count} incomplete audio files");
+                    }
+
+                    // Create new audio files with proper numbering
+                    int nextAudioNumber = GetNextAvailableAudioNumber(dateToUse, options.AudioFileType);
+                    var newAudioFiles = CreateAudioFilesForVocabulary(existingVocab, options, dateToUse, nextAudioNumber, nextAudioNumber + 1, targetDate);
+                    _context.AudioFiles.AddRange(newAudioFiles);
+                    Console.WriteLine($"✅ Created new audio files: {nextAudioNumber:00}, {nextAudioNumber + 1:00}");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Error updating audio files for VocabId {existingVocab.VocabId}: {ex.Message}");
+                throw;
+            }
+        }
+        private int GetNextAvailableAudioNumber(string dateString, string audioFileType)
+        {
+            try
+            {
+                string fileNamePattern = GetAudioFileNamePattern(dateString, audioFileType);
+                if (string.IsNullOrEmpty(fileNamePattern)) return 1;
+
+                var existingNumbers = _context.AudioFiles
+                    .Where(a => a.FileName.StartsWith(fileNamePattern))
+                    .Select(a => a.FileName)
+                    .ToList()
+                    .Select(fileName => {
+                        var parts = fileName.Split('_');
+                        if (parts.Length >= 2)
+                        {
+                            var numberPart = parts[1].Split('.')[0];
+                            if (int.TryParse(numberPart, out int number))
+                                return number;
+                        }
+                        return 0;
+                    })
+                    .Where(n => n > 0)
+                    .OrderBy(n => n)
+                    .ToList();
+
+                Console.WriteLine($"Existing audio numbers for {dateString}: [{string.Join(", ", existingNumbers)}]");
+
+                // FIND FIRST AVAILABLE ODD NUMBER
+                for (int i = 1; i <= existingNumbers.Count + 2; i += 2)
+                {
+                    if (!existingNumbers.Contains(i) && !existingNumbers.Contains(i + 1))
+                    {
+                        Console.WriteLine($"Next available audio number pair: {i}, {i + 1}");
+                        return i;
+                    }
+                }
+
+                // NO GAPS, USE NEXT ODD NUMBER
+                int nextNumber = existingNumbers.Any() ? existingNumbers.Max() + 1 : 1;
+                if (nextNumber % 2 == 0) nextNumber++; // Ensure odd number
+                Console.WriteLine($"No gaps, next audio number: {nextNumber}");
+                return nextNumber;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error getting next audio number: {ex.Message}");
+                return 1;
             }
         }
 
@@ -201,20 +336,7 @@ namespace Text_to_Image.Data
 
             // MARK AS MODIFIED
             _context.Entry(existingVocab).State = EntityState.Modified;
-
-            // TẠO AUDIO FILES MỚI CHO UPDATED VOCABULARY (nếu cần)
-            if (options.CreateAudioFiles && !string.IsNullOrWhiteSpace(options.SoundColumns))
-            {
-                // Xóa audio files cũ
-                var oldAudioFiles = await _context.AudioFiles
-                    .Where(a => a.VocabId == existingVocab.VocabId)
-                    .ToListAsync();
-                _context.AudioFiles.RemoveRange(oldAudioFiles);
-
-                // Tạo audio files mới
-                var newAudioFiles = CreateAudioFileRecordsFromVocabularies(new List<Vocabulary> { existingVocab }, options, targetDate);
-                _context.AudioFiles.AddRange(newAudioFiles);
-            }
+            Console.WriteLine($"Updated vocabulary data for VocabId {existingVocab.VocabId}");
         }
 
         // THÊM MỚI: Find exact match trong database
