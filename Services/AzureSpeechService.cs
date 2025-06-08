@@ -588,22 +588,22 @@ namespace Text_to_Image.Services
             return fileType.ToLower() switch
             {
                 "english" => processedInSession.FirstOrDefault(processed =>
-                    SimilarText(processed.VietnameseText, currentVocab.VietnameseText) ||
+                    SimilarText(processed.VietnameseText, currentVocab.VietnameseText) &&
                     SimilarText(processed.EnglishText, currentVocab.EnglishText)
                 ),
 
                 "japanese" => processedInSession.FirstOrDefault(processed =>
-                    SimilarText(processed.EnglishText, currentVocab.EnglishText) ||
+                    SimilarText(processed.EnglishText, currentVocab.EnglishText) &&
                     SimilarText(processed.JapaneseText, currentVocab.JapaneseText)
                 ),
 
                 "chinese" => processedInSession.FirstOrDefault(processed =>
-                    SimilarText(processed.EnglishText, currentVocab.EnglishText) ||
+                    SimilarText(processed.EnglishText, currentVocab.EnglishText) &&
                     SimilarText(processed.ChineseText, currentVocab.ChineseText)
                 ),
 
                 "tuvung" => processedInSession.FirstOrDefault(processed =>
-                    SimilarText(processed.VietnameseText, currentVocab.VietnameseText) ||
+                    SimilarText(processed.VietnameseText, currentVocab.VietnameseText) &&
                     SimilarText(processed.JapaneseText, currentVocab.JapaneseText)
                 ),
 

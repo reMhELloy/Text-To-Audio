@@ -637,22 +637,22 @@ namespace Text_to_Image.Services
             return fileType.ToLower() switch
             {
                 "english" => processedRows.FirstOrDefault(processed =>
-                    SimilarText(processed.VietnameseText, currentVocab.VietnameseText) ||
+                    SimilarText(processed.VietnameseText, currentVocab.VietnameseText) &&
                     SimilarText(processed.EnglishText, currentVocab.EnglishText)
                 ),
 
                 "japanese" => processedRows.FirstOrDefault(processed =>
-                    SimilarText(processed.EnglishText, currentVocab.EnglishText) ||
+                    SimilarText(processed.EnglishText, currentVocab.EnglishText) &&
                     SimilarText(processed.JapaneseText, currentVocab.JapaneseText)
                 ),
 
                 "chinese" => processedRows.FirstOrDefault(processed =>
-                    SimilarText(processed.EnglishText, currentVocab.EnglishText) ||
+                    SimilarText(processed.EnglishText, currentVocab.EnglishText) &&
                     SimilarText(processed.ChineseText, currentVocab.ChineseText)
                 ),
 
                 "tuvung" => processedRows.FirstOrDefault(processed =>
-                    SimilarText(processed.VietnameseText, currentVocab.VietnameseText) ||
+                    SimilarText(processed.VietnameseText, currentVocab.VietnameseText) &&
                     SimilarText(processed.JapaneseText, currentVocab.JapaneseText)
                 ),
 
