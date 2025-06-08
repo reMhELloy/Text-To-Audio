@@ -85,41 +85,46 @@ namespace Text_to_Image.Services
                 {
                     Console.Write("\nSelect source Kanji column (TuVung). Default: C. (Enter to skip). ");
                     string kanjiInput = Console.ReadLine()?.ToUpper();
-                    options.KanjiColumn = string.IsNullOrWhiteSpace(kanjiInput) ? "C" : kanjiInput;
 
-                    Console.Write("Select column to save processed Kanji results (TuVung). Default: B. (Enter to skip). ");
-                    string outputInput = Console.ReadLine()?.ToUpper();
-                    options.KanjiOutputColumn = string.IsNullOrWhiteSpace(outputInput) ? "B" : outputInput;
+                    // CHỈ SET NẾU USER NHẬP GÌ ĐÓ
+                    if (!string.IsNullOrWhiteSpace(kanjiInput))
+                    {
+                        options.KanjiColumn = kanjiInput;
+                        options.KanjiOutputColumn = "B"; // LUÔN DÙNG B
+                    }
                 }
                 else if (isJapaneseFile)
                 {
                     Console.Write("\nSelect source Kanji column (Japanese). Default: C. (Enter to skip). ");
                     string kanjiInput = Console.ReadLine()?.ToUpper();
-                    options.KanjiColumn = string.IsNullOrWhiteSpace(kanjiInput) ? "C" : kanjiInput;
 
-                    Console.Write("Select column to save processed Kanji results (Japanese). Default: B. (Enter to skip). ");
-                    string outputInput = Console.ReadLine()?.ToUpper();
-                    options.KanjiOutputColumn = string.IsNullOrWhiteSpace(outputInput) ? "B" : outputInput;
+                    if (!string.IsNullOrWhiteSpace(kanjiInput))
+                    {
+                        options.KanjiColumn = kanjiInput;
+                        options.KanjiOutputColumn = "B"; // LUÔN DÙNG B
+                    }
                 }
                 else if (isChineseFile)
                 {
                     Console.Write("\nSelect source Kanji column (Chinese). Default: C. (Enter to skip). ");
                     string kanjiInput = Console.ReadLine()?.ToUpper();
-                    options.KanjiColumn = string.IsNullOrWhiteSpace(kanjiInput) ? "C" : kanjiInput;
 
-                    Console.Write("Select column to save processed Kanji results (Chinese). Default: B. (Enter to skip). ");
-                    string outputInput = Console.ReadLine()?.ToUpper();
-                    options.KanjiOutputColumn = string.IsNullOrWhiteSpace(outputInput) ? "B" : outputInput;
+                    if (!string.IsNullOrWhiteSpace(kanjiInput))
+                    {
+                        options.KanjiColumn = kanjiInput;
+                        options.KanjiOutputColumn = "B"; // LUÔN DÙNG B
+                    }
                 }
                 else
                 {
                     Console.Write("\nSelect source Kanji column. Default: C. (Enter to skip). ");
                     string kanjiInput = Console.ReadLine()?.ToUpper();
-                    options.KanjiColumn = string.IsNullOrWhiteSpace(kanjiInput) ? "C" : kanjiInput;
 
-                    Console.Write("Select column to save processed Kanji results. Default: B. (Enter to skip). ");
-                    string outputInput = Console.ReadLine()?.ToUpper();
-                    options.KanjiOutputColumn = string.IsNullOrWhiteSpace(outputInput) ? "B" : outputInput;
+                    if (!string.IsNullOrWhiteSpace(kanjiInput))
+                    {
+                        options.KanjiColumn = kanjiInput;
+                        options.KanjiOutputColumn = "B"; // LUÔN DÙNG B
+                    }
                 }
             }
         }
