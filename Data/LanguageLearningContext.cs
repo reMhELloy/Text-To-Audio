@@ -13,7 +13,8 @@ namespace Text_to_Image.Data
         {
             // Connection string cho SQL Server của bạn
             optionsBuilder.UseSqlServer(
-                "Server=REM\\MSSQLSERVER_MEGA;Database=LanguageLearningDB;Integrated Security=true;TrustServerCertificate=true;"
+                //"Server=REM\\MSSQLSERVER_MEGA;Database=LanguageLearningDB;Integrated Security=true;TrustServerCertificate=true;"
+                "Server=REM\\MSSQLSERVER_MEGA;Database=LanguageLearningDB;User Id=sa;Password=1;TrustServerCertificate=true;"
             );
         }
 
