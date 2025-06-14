@@ -1,142 +1,112 @@
-﻿using Microsoft.CognitiveServices.Speech;
-using OfficeOpenXml;
+﻿using System;
+using System.Net.Http;
+using System.Threading.Tasks;
+using System.IO;
 using Text_to_Image.Models;
-using Text_to_Image.Data.Models;
+using System.Collections.Generic;
+using System.Threading;
+using System.Linq;
 using Text_to_Image.Services;
+using Text_to_Image.Data.Models;
 using Text_to_Image.Data;
+using OfficeOpenXml;
 
 namespace Text_to_Image.Services
 {
-    public class AzureSpeechService : ISpeechService
+    public class GoogleTranslateTTSService : ISpeechService
     {
-        private readonly string _speechKey;
-        private readonly string _speechRegion;
-        private readonly SpeechConfig _speechConfig;
+        private readonly HttpClient _httpClient;
+        private readonly SemaphoreSlim _semaphore;
 
-        public AzureSpeechService(string speechKey, string speechRegion)
+        public GoogleTranslateTTSService()
         {
-            _speechKey = speechKey;
-            _speechRegion = speechRegion;
-            _speechConfig = SpeechConfig.FromSubscription(_speechKey, _speechRegion);
-
-            // Set output format to MP3
-            _speechConfig.SetSpeechSynthesisOutputFormat(SpeechSynthesisOutputFormat.Audio16Khz32KBitRateMonoMp3);
+            _httpClient = new HttpClient();
+            _httpClient.DefaultRequestHeaders.Add("User-Agent",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+            _semaphore = new SemaphoreSlim(3); // 3 request cùng lúc như GoogleSpeechService
         }
 
-        private int GetColumnIndex(string columnLetter)
+        public async Task<bool> CreateAudioFile(string text, string outputPath, string voiceName = "en")
         {
-            if (string.IsNullOrEmpty(columnLetter))
-                return 1;
+            int maxRetries = 3;
+            int retryDelay = 1000;
 
-            int result = 0;
-            for (int i = 0; i < columnLetter.Length; i++)
+            for (int attempt = 0; attempt < maxRetries; attempt++)
             {
-                result = result * 26 + (columnLetter[i] - 'A' + 1);
-            }
-            return result;
-        }
-
-        // Tạo file âm thanh từ text với giọng nói tùy chọn - CÓ CHẤT LƯỢNG CHO NGƯỜI MỚI HỌC
-        public async Task<bool> CreateAudioFile(string text, string outputPath, string voiceName = "en-US-JennyNeural")
-        {
-            try
-            {
-                if (string.IsNullOrWhiteSpace(text))
+                try
                 {
+                    if (string.IsNullOrWhiteSpace(text))
+                        return false;
+
+                    // Tạo thư mục nếu chưa tồn tại
+                    string directory = Path.GetDirectoryName(outputPath);
+                    if (!Directory.Exists(directory))
+                        Directory.CreateDirectory(directory);
+
+                    // Xác định language code từ voice name
+                    string languageCode = GetLanguageCode(voiceName);
+
+                    // Tối ưu text cho người mới học (thêm pause)
+                    string optimizedText = OptimizeTextForLearners(text, languageCode);
+
+                    // Split text thành chunks nhỏ (Google Translate có giới hạn ~100 ký tự)
+                    var textChunks = SplitTextIntoChunks(optimizedText, 100);
+                    var audioBytes = new List<byte>();
+
+                    foreach (var chunk in textChunks)
+                    {
+                        var chunkAudio = await GetGoogleTranslateTTS(chunk.Trim(), languageCode);
+                        if (chunkAudio != null && chunkAudio.Length > 0)
+                        {
+                            audioBytes.AddRange(chunkAudio);
+                        }
+
+                        // Delay để tránh rate limiting
+                        await Task.Delay(200);
+                    }
+
+                    if (audioBytes.Count > 0)
+                    {
+                        await File.WriteAllBytesAsync(outputPath, audioBytes.ToArray());
+                        Console.WriteLine($"✓ [GOOGLE-TRANSLATE] {Path.GetFileName(outputPath)} (Language: {languageCode})");
+                        return true;
+                    }
+
+                    if (attempt < maxRetries - 1)
+                    {
+                        Console.WriteLine($"⏳ [GOOGLE-TRANSLATE] {Path.GetFileName(outputPath)}: Retrying... (Attempt {attempt + 1}/{maxRetries})");
+                        await Task.Delay(retryDelay);
+                        retryDelay *= 2; // Exponential backoff
+                        continue;
+                    }
+
+                    Console.WriteLine($"✗ [GOOGLE-TRANSLATE] {Path.GetFileName(outputPath)}: No audio data received");
                     return false;
                 }
-
-                _speechConfig.SpeechSynthesisVoiceName = voiceName;
-
-                // Tạo thư mục nếu chưa tồn tại
-                string directory = Path.GetDirectoryName(outputPath);
-                if (!Directory.Exists(directory))
+                catch (Exception ex)
                 {
-                    Directory.CreateDirectory(directory);
+                    if (attempt < maxRetries - 1)
+                    {
+                        Console.WriteLine($"⏳ [GOOGLE-TRANSLATE] {Path.GetFileName(outputPath)}: Error, retrying... {ex.Message}");
+                        await Task.Delay(retryDelay);
+                        retryDelay *= 2;
+                        continue;
+                    }
+
+                    Console.WriteLine($"✗ [GOOGLE-TRANSLATE] {Path.GetFileName(outputPath)}: {ex.Message}");
+                    return false;
                 }
-
-                // Tạo SSML với cấu hình phù hợp cho người mới học
-                string ssmlText = CreateSSMLForLearners(text, voiceName);
-
-                // Sử dụng synthesizer mà không cần AudioConfig để lấy raw audio data
-                using var synthesizer = new SpeechSynthesizer(_speechConfig, null);
-
-                var result = await synthesizer.SpeakSsmlAsync(ssmlText);
-
-                if (result.Reason == ResultReason.SynthesizingAudioCompleted)
-                {
-                    // Lưu audio data trực tiếp thành file MP3
-                    await File.WriteAllBytesAsync(outputPath, result.AudioData);
-                    Console.WriteLine($"✓ [AZURE] {Path.GetFileName(outputPath)}");
-                    return true;
-                }
-                else if (result.Reason == ResultReason.Canceled)
-                {
-                    var cancellation = SpeechSynthesisCancellationDetails.FromResult(result);
-                    Console.WriteLine($"✗ {Path.GetFileName(outputPath)}: {cancellation.Reason}");
-                }
-
-                return false;
             }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"✗ {Path.GetFileName(outputPath)}: {ex.Message}");
-                return false;
-            }
+
+            return false;
         }
 
-        // Tạo SSML với cấu hình tối ưu cho người mới học
-        private string CreateSSMLForLearners(string text, string voiceName)
-        {
-            // Xác định tốc độ đọc và style dựa trên giọng nói
-            string rate = "1.0"; // Tốc độ bình thường cho tiếng Việt
-            string style = "";
-
-            // Cấu hình tùy chỉnh cho từng ngôn ngữ
-            if (voiceName.Contains("en-US") || voiceName.Contains("en-GB"))
-            {
-                rate = "0.75"; // Tiếng Anh đọc chậm hơn nữa
-                style = @"style=""calm"""; // Giọng điềm tĩnh cho tiếng Anh
-            }
-            else if (voiceName.Contains("ja-JP"))
-            {
-                rate = "0.7"; // Tiếng Nhật đọc rất chậm
-                style = @"style=""calm"""; // Giọng điềm tĩnh
-            }
-            else if (voiceName.Contains("zh-CN") || voiceName.Contains("zh-TW"))
-            {
-                rate = "0.7"; // Tiếng Trung đọc rất chậm
-                style = @"style=""calm"""; // Giọng điềm tĩnh
-            }
-            else if (voiceName.Contains("vi-VN"))
-            {
-                rate = "1.0"; // Tiếng Việt đọc bình thường - KHÔNG CHẬM
-                style = @"style=""calm"""; // Giọng điềm tĩnh
-            }
-
-            // Escape XML characters trong text
-            string escapedText = System.Security.SecurityElement.Escape(text);
-
-            // Tạo SSML với silent đầu/cuối và tốc độ phù hợp
-            string ssml = $@"<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='en-US'>
-                <voice name='{voiceName}'>
-                <break time='200ms'/>
-                <prosody rate='{rate}' {style}>
-                {escapedText}
-                </prosody>
-                <break time='300ms'/>
-                </voice>
-                </speak>";
-
-            return ssml;
-        }
-
-        // MAIN METHOD: Process Excel for Audio với logic duplicate mới
+        // MAIN METHOD: Process Excel for Audio với logic duplicate từ GoogleSpeechService
         public async Task ProcessExcelForAudio(ProcessingOptions options)
         {
             try
             {
-                Console.WriteLine("Creating audio files with AZURE TTS...");
+                Console.WriteLine("Creating audio files with GOOGLE TRANSLATE Text-to-Speech...");
 
                 string dateToUse = string.IsNullOrWhiteSpace(options.CustomDate) ?
                     DateTime.Now.ToString("dd-MM-yyyy") : options.CustomDate;
@@ -214,37 +184,35 @@ namespace Text_to_Image.Services
                 Console.WriteLine("PHASE 3: Executing audio creation actions...");
                 await ExecuteAudioCreationActions(worksheet, processingResults, options, audioTasks);
 
-                // Execute tất cả audio tasks
+                // Execute tất cả audio tasks với semaphore
                 if (audioTasks.Count > 0)
                 {
-                    Console.WriteLine($"Creating {audioTasks.Count} audio files with optimized settings for learners...");
+                    Console.WriteLine($"Creating {audioTasks.Count} audio files with Google Translate TTS optimized for learners...");
 
-                    // Tạo âm thanh song song (giới hạn 3 files cùng lúc để tránh quá tải API)
-                    var semaphore = new SemaphoreSlim(3);
+                    // Tạo âm thanh song song (giới hạn 3 files cùng lúc)
                     var tasks = audioTasks.Select(async task =>
                     {
-                        await semaphore.WaitAsync();
+                        await _semaphore.WaitAsync();
                         try
                         {
                             await task;
                         }
                         finally
                         {
-                            semaphore.Release();
+                            _semaphore.Release();
                         }
                     });
 
                     await Task.WhenAll(tasks);
-                    semaphore.Dispose();
 
-                    Console.WriteLine($"Completed! Created {audioTasks.Count} audio files with learner-friendly settings.");
+                    Console.WriteLine($"Completed! Created {audioTasks.Count} audio files with Google Translate TTS.");
                 }
                 else
                 {
                     Console.WriteLine("No audio files to create.");
                 }
 
-                Console.WriteLine("All audio files have been created successfully.");
+                Console.WriteLine("All audio files have been created successfully with GOOGLE TRANSLATE Text-to-Speech.");
             }
             catch (Exception ex)
             {
@@ -252,6 +220,144 @@ namespace Text_to_Image.Services
                 throw;
             }
         }
+
+        // Tối ưu text cho người mới học
+        private string OptimizeTextForLearners(string text, string languageCode)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return text;
+
+            // Thêm dấu chấm và pause cho text dài
+            string optimizedText = text.Trim();
+
+            // Thêm pause giữa các từ cho ngôn ngữ khó
+            switch (languageCode)
+            {
+                case "ja":  // Japanese
+                case "zh":  // Chinese
+                    // Thêm dấu phẩy để tạo pause tự nhiên
+                    optimizedText = System.Text.RegularExpressions.Regex.Replace(optimizedText, @"(\S+)", "$1,");
+                    optimizedText = optimizedText.TrimEnd(',');
+                    break;
+
+                case "en":  // English
+                    // Thêm dấu chấm cuối nếu chưa có
+                    if (!optimizedText.EndsWith(".") && !optimizedText.EndsWith("!") && !optimizedText.EndsWith("?"))
+                    {
+                        optimizedText += ".";
+                    }
+                    break;
+            }
+
+            return optimizedText;
+        }
+
+        private async Task<byte[]> GetGoogleTranslateTTS(string text, string languageCode)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(text)) return null;
+
+                // URL của Google Translate TTS (unofficial API)
+                var encodedText = Uri.EscapeDataString(text);
+                var url = $"https://translate.google.com/translate_tts?ie=UTF-8&total=1&idx=0&client=tw-ob&tl={languageCode}&q={encodedText}&textlen={text.Length}";
+
+                var response = await _httpClient.GetAsync(url);
+
+                if (response.IsSuccessStatusCode)
+                {
+                    var audioData = await response.Content.ReadAsByteArrayAsync();
+                    if (audioData.Length > 0)
+                        return audioData;
+                }
+
+                return null;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private string GetLanguageCode(string voiceName)
+        {
+            return voiceName switch
+            {
+                var name when name.Contains("EN") || name.Contains("en-US") || name.Equals("en") => "en",
+                var name when name.Contains("VI") || name.Contains("vi-VN") || name.Equals("vi") => "vi",
+                var name when name.Contains("JP") || name.Contains("ja-JP") || name.Equals("ja") => "ja",
+                var name when name.Contains("ZH") || name.Contains("cmn-CN") || name.Equals("zh") => "zh",
+                _ => "en"
+            };
+        }
+
+        private List<string> SplitTextIntoChunks(string text, int maxLength)
+        {
+            var chunks = new List<string>();
+
+            if (text.Length <= maxLength)
+            {
+                chunks.Add(text);
+                return chunks;
+            }
+
+            // Split by sentences first
+            var sentences = text.Split(new char[] { '.', '!', '?', ';' }, StringSplitOptions.RemoveEmptyEntries);
+            var currentChunk = "";
+
+            foreach (var sentence in sentences)
+            {
+                var trimmedSentence = sentence.Trim();
+                if (string.IsNullOrEmpty(trimmedSentence)) continue;
+
+                if ((currentChunk + " " + trimmedSentence).Length <= maxLength)
+                {
+                    currentChunk += (string.IsNullOrEmpty(currentChunk) ? "" : " ") + trimmedSentence;
+                }
+                else
+                {
+                    if (!string.IsNullOrEmpty(currentChunk))
+                        chunks.Add(currentChunk.Trim());
+
+                    // If single sentence is too long, split by words
+                    if (trimmedSentence.Length > maxLength)
+                    {
+                        var words = trimmedSentence.Split(' ');
+                        var wordChunk = "";
+
+                        foreach (var word in words)
+                        {
+                            if ((wordChunk + " " + word).Length <= maxLength)
+                            {
+                                wordChunk += (string.IsNullOrEmpty(wordChunk) ? "" : " ") + word;
+                            }
+                            else
+                            {
+                                if (!string.IsNullOrEmpty(wordChunk))
+                                    chunks.Add(wordChunk.Trim());
+                                wordChunk = word;
+                            }
+                        }
+
+                        if (!string.IsNullOrEmpty(wordChunk))
+                            chunks.Add(wordChunk.Trim());
+
+                        currentChunk = "";
+                    }
+                    else
+                    {
+                        currentChunk = trimmedSentence;
+                    }
+                }
+            }
+
+            if (!string.IsNullOrEmpty(currentChunk))
+                chunks.Add(currentChunk.Trim());
+
+            return chunks.Where(c => !string.IsNullOrWhiteSpace(c)).ToList();
+        }
+
+        #region Duplicate Logic Methods (từ GoogleSpeechService)
+
         private void ApplyAudioConflictResolutionLogic(List<AudioProcessingInfo> processingResults, List<Vocabulary> existingVocabs, ProcessingOptions options)
         {
             string fileType = DetermineFileType(options.FileName);
@@ -298,6 +404,439 @@ namespace Text_to_Image.Services
                 }
             }
         }
+
+        private DuplicateCheckResult CheckRowForDuplicateAudio(Vocabulary currentVocab, List<Vocabulary> existingVocabs, List<Vocabulary> processedInSession, ProcessingOptions options)
+        {
+            string fileType = DetermineFileType(options.FileName);
+
+            // CHECK 1: EXACT MATCH trong database
+            var exactMatch = FindExactMatchInDatabase(currentVocab, existingVocabs, fileType);
+            if (exactMatch != null)
+            {
+                return new DuplicateCheckResult
+                {
+                    IsDuplicate = true,
+                    ExistingVocab = exactMatch,
+                    DuplicateSource = "Database",
+                    MatchType = "Exact",
+                    Action = "Skip"
+                };
+            }
+
+            // CHECK 2: PARTIAL MATCH trong database  
+            var partialMatch = FindPartialMatchInDatabase(currentVocab, existingVocabs, fileType);
+            if (partialMatch != null)
+            {
+                return new DuplicateCheckResult
+                {
+                    IsDuplicate = true,
+                    ExistingVocab = partialMatch,
+                    DuplicateSource = "Database",
+                    MatchType = "Partial",
+                    Action = "RestoreAndUpdate"
+                };
+            }
+
+            // CHECK 3: Current session exact duplicates
+            var sessionExactMatch = FindExactMatchInCurrentSession(currentVocab, processedInSession, fileType);
+            if (sessionExactMatch != null)
+            {
+                return new DuplicateCheckResult
+                {
+                    IsDuplicate = true,
+                    ExistingVocab = sessionExactMatch,
+                    DuplicateSource = "CurrentSession",
+                    MatchType = "Exact",
+                    Action = "Skip"
+                };
+            }
+
+            // CHECK 4: Current session partial duplicates
+            var sessionPartialMatch = FindPartialMatchInCurrentSession(currentVocab, processedInSession, fileType);
+            if (sessionPartialMatch != null)
+            {
+                return new DuplicateCheckResult
+                {
+                    IsDuplicate = true,
+                    ExistingVocab = sessionPartialMatch,
+                    DuplicateSource = "CurrentSession",
+                    MatchType = "Partial",
+                    Action = "Skip"
+                };
+            }
+
+            return new DuplicateCheckResult { IsDuplicate = false, Action = "CreateNew" };
+        }
+
+        private async Task ExecuteAudioCreationActions(ExcelWorksheet worksheet, List<AudioProcessingInfo> processingResults, ProcessingOptions options, List<Task> audioTasks)
+        {
+            foreach (var info in processingResults)
+            {
+                if (!info.HasAudioFormulas)
+                {
+                    Console.WriteLine($"Row {info.RowNumber}: Skipping audio creation (no sound formulas)");
+                    continue;
+                }
+
+                switch (info.DuplicateResult.Action)
+                {
+                    case "Skip":
+                        string reason = info.DuplicateResult.MatchType == "Exact" ? "exact duplicate" : "duplicate in current session";
+                        Console.WriteLine($"Row {info.RowNumber}: SKIPPED - {reason}");
+                        break;
+
+                    case "RestoreAndUpdate":
+                        Console.WriteLine($"Row {info.RowNumber}: PARTIAL DUPLICATE - creating audio with old filenames");
+                        await CreateAudioForDatabaseDuplicate(worksheet, info.RowNumber, info.DuplicateResult.ExistingVocab, options, audioTasks);
+                        break;
+
+                    case "CreateNew":
+                    case "CreateNewConflict":
+                        string actionType = info.DuplicateResult.Action == "CreateNewConflict" ? "CONFLICT" : "NEW ENTRY";
+                        Console.WriteLine($"Row {info.RowNumber}: {actionType} - creating audio with new filenames");
+                        await CreateAudioForNewEntry(worksheet, info.RowNumber, options, audioTasks);
+                        break;
+                }
+            }
+        }
+
+        private async Task CreateAudioForDatabaseDuplicate(ExcelWorksheet worksheet, int row, Vocabulary existingVocab, ProcessingOptions options, List<Task> audioTasks)
+        {
+            try
+            {
+                // Lấy audio files cũ từ database
+                using var dbService = new DatabaseService();
+                var existingAudioFiles = await dbService.GetAudioFilesByVocabIdAsync(existingVocab.VocabId);
+
+                if (existingAudioFiles == null || existingAudioFiles.Count == 0)
+                {
+                    Console.WriteLine($"Row {row}: No existing audio files found - skipping audio creation");
+                    return;
+                }
+
+                Console.WriteLine($"Row {row}: Creating audio with OLD filenames but NEW content using Google Translate TTS");
+
+                // Tạo audio cho từng file cũ với nội dung mới
+                foreach (var audioFile in existingAudioFiles)
+                {
+                    string newText = GetTextForAudio(worksheet, row, audioFile.Language, options);
+                    if (!string.IsNullOrEmpty(newText))
+                    {
+                        string outputPath = Path.Combine(options.AudioOutputFolder, audioFile.FileName);
+                        string languageCode = GetLanguageCode(audioFile.Language);
+                        var task = CreateAudioFile(newText, outputPath, languageCode);
+                        audioTasks.Add(task);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Row {row}: Error creating audio for duplicate - {ex.Message}");
+            }
+        }
+
+        private async Task CreateAudioForNewEntry(ExcelWorksheet worksheet, int row, ProcessingOptions options, List<Task> audioTasks)
+        {
+            // Check nếu row có sound formulas
+            if (!CheckRowHasAudioFormulas(worksheet, row, options))
+            {
+                Console.WriteLine($"Row {row}: Skipping audio creation (no sound formulas)");
+                return;
+            }
+
+            // Lấy sound formulas từ Excel
+            var soundFormulas = ExtractAudioFilesFromRow(worksheet, row, options);
+
+            foreach (var audioInfo in soundFormulas)
+            {
+                string text = GetTextForAudio(worksheet, row, ExtractLanguageFromFileName(audioInfo.FileName), options);
+                if (!string.IsNullOrEmpty(text))
+                {
+                    string outputPath = Path.Combine(options.AudioOutputFolder, audioInfo.FileName);
+                    string languageCode = GetLanguageCode(ExtractLanguageFromFileName(audioInfo.FileName));
+                    var task = CreateAudioFile(text, outputPath, languageCode);
+                    audioTasks.Add(task);
+                }
+            }
+        }
+
+        #endregion
+
+        #region Helper Methods (từ GoogleSpeechService)
+
+        private Vocabulary CreateVocabularyFromRow(ExcelWorksheet worksheet, int row, ProcessingOptions options)
+        {
+            var vocab = new Vocabulary();
+            string fileType = DetermineFileType(options.FileName);
+
+            switch (fileType.ToLower())
+            {
+                case "english":
+                    vocab.VietnameseText = GetCellValue(worksheet, row, 1);
+                    vocab.EnglishText = GetCellValue(worksheet, row, 2);
+                    break;
+                case "japanese":
+                    vocab.EnglishText = GetCellValue(worksheet, row, 1);
+                    vocab.ReadingText = GetCellValue(worksheet, row, 2);
+                    vocab.JapaneseText = GetCellValue(worksheet, row, 3);
+                    break;
+                case "chinese":
+                    vocab.EnglishText = GetCellValue(worksheet, row, 1);
+                    vocab.ReadingText = GetCellValue(worksheet, row, 2);
+                    vocab.ChineseText = GetCellValue(worksheet, row, 3);
+                    break;
+                case "tuvung":
+                    vocab.VietnameseText = GetCellValue(worksheet, row, 1);
+                    vocab.ReadingText = GetCellValue(worksheet, row, 2);
+                    vocab.JapaneseText = GetCellValue(worksheet, row, 3);
+                    break;
+            }
+
+            return vocab;
+        }
+
+        private bool CheckRowHasAudioFormulas(ExcelWorksheet worksheet, int row, ProcessingOptions options)
+        {
+            if (string.IsNullOrWhiteSpace(options.SoundColumns)) return false;
+
+            if ((options.FileName.Contains("tuvung") ||
+                 options.FileName.Contains("japanese") ||
+                 options.FileName.Contains("chinese")) && options.SoundColumns.Length == 2)
+            {
+                string col1Value = worksheet.Cells[row, 5].Text?.Trim();
+                string col2Value = worksheet.Cells[row, 6].Text?.Trim();
+
+                return !string.IsNullOrEmpty(col1Value) && !string.IsNullOrEmpty(col2Value) &&
+                       col1Value.Contains("[sound:") && col2Value.Contains("[sound:");
+            }
+            else if (options.FileName.Contains("english") && options.SoundColumns.Length == 2)
+            {
+                int soundCol1 = options.SoundColumns[0] - 'A' + 1;
+                int soundCol2 = options.SoundColumns[1] - 'A' + 1;
+
+                string col1Value = worksheet.Cells[row, soundCol1].Text?.Trim();
+                string col2Value = worksheet.Cells[row, soundCol2].Text?.Trim();
+
+                return !string.IsNullOrEmpty(col1Value) && !string.IsNullOrEmpty(col2Value) &&
+                       col1Value.Contains("[sound:") && col2Value.Contains("[sound:");
+            }
+
+            return false;
+        }
+
+        private List<AudioFileInfo> ExtractAudioFilesFromRow(ExcelWorksheet worksheet, int row, ProcessingOptions options)
+        {
+            var audioFiles = new List<AudioFileInfo>();
+
+            if ((options.FileName.Contains("tuvung") ||
+                 options.FileName.Contains("japanese") ||
+                 options.FileName.Contains("chinese")) && options.SoundColumns.Length == 2)
+            {
+                string col1Formula = worksheet.Cells[row, 5].Text?.Trim(); // Column E
+                string col2Formula = worksheet.Cells[row, 6].Text?.Trim(); // Column F
+
+                if (!string.IsNullOrEmpty(col1Formula) && col1Formula.Contains("[sound:"))
+                {
+                    string fileName = ExtractFileNameFromFormula(col1Formula);
+                    string lang = ExtractLanguageFromFileName(fileName);
+                    string sourceCol = GetSourceColumnForLanguage(lang, options);
+
+                    audioFiles.Add(new AudioFileInfo
+                    {
+                        RowIndex = row,
+                        SourceColumn = sourceCol,
+                        FileName = fileName,
+                        VoiceName = GetLanguageCode(lang)
+                    });
+                }
+
+                if (!string.IsNullOrEmpty(col2Formula) && col2Formula.Contains("[sound:"))
+                {
+                    string fileName = ExtractFileNameFromFormula(col2Formula);
+                    string lang = ExtractLanguageFromFileName(fileName);
+                    string sourceCol = GetSourceColumnForLanguage(lang, options);
+
+                    audioFiles.Add(new AudioFileInfo
+                    {
+                        RowIndex = row,
+                        SourceColumn = sourceCol,
+                        FileName = fileName,
+                        VoiceName = GetLanguageCode(lang)
+                    });
+                }
+            }
+            else if (options.FileName.Contains("english") && options.SoundColumns.Length == 2)
+            {
+                // XỬ LÝ CHO ENGLISH FILES
+                int soundCol1 = options.SoundColumns[0] - 'A' + 1;
+                int soundCol2 = options.SoundColumns[1] - 'A' + 1;
+
+                string col1Formula = worksheet.Cells[row, soundCol1].Text?.Trim();
+                string col2Formula = worksheet.Cells[row, soundCol2].Text?.Trim();
+
+                if (!string.IsNullOrEmpty(col1Formula) && col1Formula.Contains("[sound:"))
+                {
+                    string fileName = ExtractFileNameFromFormula(col1Formula);
+                    string lang = ExtractLanguageFromFileName(fileName);
+                    string sourceCol = GetSourceColumnForLanguage(lang, options);
+
+                    audioFiles.Add(new AudioFileInfo
+                    {
+                        RowIndex = row,
+                        SourceColumn = sourceCol,
+                        FileName = fileName,
+                        VoiceName = GetLanguageCode(lang)
+                    });
+                }
+
+                if (!string.IsNullOrEmpty(col2Formula) && col2Formula.Contains("[sound:"))
+                {
+                    string fileName = ExtractFileNameFromFormula(col2Formula);
+                    string lang = ExtractLanguageFromFileName(fileName);
+                    string sourceCol = GetSourceColumnForLanguage(lang, options);
+
+                    audioFiles.Add(new AudioFileInfo
+                    {
+                        RowIndex = row,
+                        SourceColumn = sourceCol,
+                        FileName = fileName,
+                        VoiceName = GetLanguageCode(lang)
+                    });
+                }
+            }
+
+            return audioFiles;
+        }
+
+        private string ExtractLanguageFromFileName(string fileName)
+        {
+            // Extract language from filename based on odd/even number
+            if (fileName.Contains("_"))
+            {
+                var parts = fileName.Split('_');
+                if (parts.Length >= 2)
+                {
+                    var numberPart = parts[1].Split('.')[0];
+
+                    if (int.TryParse(numberPart, out int number))
+                    {
+                        bool isOdd = (number % 2 == 1);
+
+                        // Xác định language dựa vào file type + odd/even
+                        if (fileName.StartsWith("JP-"))
+                        {
+                            return isOdd ? "EN" : "JP";
+                        }
+                        else if (fileName.StartsWith("ZH-"))
+                        {
+                            return isOdd ? "EN" : "ZH";
+                        }
+                        else if (fileName.StartsWith("Vocab-"))
+                        {
+                            return isOdd ? "EN" : "VI";
+                        }
+                        else if (fileName.StartsWith("EN-"))
+                        {
+                            return isOdd ? "VI" : "EN";
+                        }
+                    }
+                }
+            }
+
+            return "EN"; // Default
+        }
+
+        private string GetSourceColumnForLanguage(string language, ProcessingOptions options)
+        {
+            if (options.FileName.Contains("tuvung"))
+            {
+                return "A"; // Cả EN và VI voice đều đọc Vietnamese text từ Column A
+            }
+            else if (options.FileName.Contains("japanese"))
+            {
+                return language switch
+                {
+                    "EN" => "A", // English voice đọc English text từ Column A
+                    "JP" => "C", // Japanese voice đọc Japanese text từ Column C  
+                    _ => "A"
+                };
+            }
+            else if (options.FileName.Contains("chinese"))
+            {
+                return language switch
+                {
+                    "EN" => "A", // English voice đọc English text từ Column A
+                    "ZH" => "C", // Chinese voice đọc Chinese text từ Column C
+                    _ => "A"
+                };
+            }
+            else if (options.FileName.Contains("english"))
+            {
+                return language switch
+                {
+                    "VI" => "A", // Vietnamese voice đọc Vietnamese text từ Column A
+                    "EN" => "B", // English voice đọc English text từ Column B
+                    _ => "A"
+                };
+            }
+
+            return "A"; // Default
+        }
+
+        private string GetTextForAudio(ExcelWorksheet worksheet, int row, string language, ProcessingOptions options)
+        {
+            string sourceColumn = GetSourceColumnForLanguage(language, options);
+            int colIndex = GetColumnIndex(sourceColumn);
+            return worksheet.Cells[row, colIndex].Text?.Trim() ?? "";
+        }
+
+        private string ExtractFileNameFromFormula(string formula)
+        {
+            int start = formula.IndexOf("[sound:") + 7;
+            int end = formula.IndexOf("]", start);
+            if (start > 6 && end > start)
+            {
+                return formula.Substring(start, end - start);
+            }
+            return "";
+        }
+
+        private int GetColumnIndex(string columnLetter)
+        {
+            if (string.IsNullOrEmpty(columnLetter))
+                return 1;
+
+            int result = 0;
+            for (int i = 0; i < columnLetter.Length; i++)
+            {
+                result = result * 26 + (columnLetter[i] - 'A' + 1);
+            }
+            return result;
+        }
+
+        private string GetCellValue(ExcelWorksheet worksheet, int row, int column)
+        {
+            var value = worksheet.Cells[row, column].Text?.Trim();
+            return string.IsNullOrEmpty(value) ? "" : value;
+        }
+
+        private bool SimilarText(string text1, string text2)
+        {
+            if (string.IsNullOrWhiteSpace(text1) || string.IsNullOrWhiteSpace(text2))
+                return false;
+            return text1.Trim().Equals(text2.Trim(), StringComparison.OrdinalIgnoreCase);
+        }
+
+        private string DetermineFileType(string fileName)
+        {
+            fileName = fileName.ToLower();
+            if (fileName.Contains("english")) return "English";
+            if (fileName.Contains("japanese")) return "Japanese";
+            if (fileName.Contains("chinese")) return "Chinese";
+            if (fileName.Contains("tuvung")) return "TuVung";
+            return "Unknown";
+        }
+
         private bool SimilarVocabulary(Vocabulary vocab1, Vocabulary vocab2, string fileType)
         {
             return fileType.ToLower() switch
@@ -313,6 +852,7 @@ namespace Text_to_Image.Services
                 _ => false
             };
         }
+
         private List<string> GetConflictFields(Vocabulary current, Vocabulary existing, string fileType)
         {
             var conflicts = new List<string>();
@@ -356,512 +896,6 @@ namespace Text_to_Image.Services
 
             return conflicts;
         }
-
-
-        private async Task ExecuteAudioCreationActions(ExcelWorksheet worksheet, List<AudioProcessingInfo> processingResults, ProcessingOptions options, List<Task> audioTasks)
-        {
-            foreach (var info in processingResults)
-            {
-                if (!info.HasAudioFormulas)
-                {
-                    Console.WriteLine($"Row {info.RowNumber}: Skipping audio creation (no sound formulas)");
-                    continue;
-                }
-
-                switch (info.DuplicateResult.Action)
-                {
-                    case "Skip":
-                        string reason = info.DuplicateResult.MatchType == "Exact" ? "exact duplicate" : "duplicate in current session";
-                        Console.WriteLine($"Row {info.RowNumber}: SKIPPED - {reason}");
-                        break;
-
-                    case "RestoreAndUpdate":
-                        Console.WriteLine($"Row {info.RowNumber}: PARTIAL DUPLICATE - creating audio with old filenames");
-                        await CreateAudioForDatabaseDuplicate(worksheet, info.RowNumber, info.DuplicateResult.ExistingVocab, options, audioTasks);
-                        break;
-
-                    case "CreateNew":
-                    case "CreateNewConflict":
-                        string actionType = info.DuplicateResult.Action == "CreateNewConflict" ? "CONFLICT" : "NEW ENTRY";
-                        Console.WriteLine($"Row {info.RowNumber}: {actionType} - creating audio with new filenames");
-                        await CreateAudioForNewEntry(worksheet, info.RowNumber, options, audioTasks);
-                        break;
-                }
-            }
-        }
-
-
-        // THÊM MỚI: Tạo audio cho database duplicate với tên file cũ
-        private async Task CreateAudioForDatabaseDuplicate(ExcelWorksheet worksheet, int row, Vocabulary existingVocab, ProcessingOptions options, List<Task> audioTasks)
-        {
-            try
-            {
-                // Lấy audio files cũ từ database
-                using var dbService = new DatabaseService();
-                var existingAudioFiles = await dbService.GetAudioFilesByVocabIdAsync(existingVocab.VocabId);
-
-                if (existingAudioFiles == null || existingAudioFiles.Count == 0)
-                {
-                    Console.WriteLine($"Row {row}: No existing audio files found - skipping audio creation");
-                    return;
-                }
-
-                Console.WriteLine($"Row {row}: Creating audio with OLD filenames but NEW content");
-
-                // Tạo audio cho từng file cũ với nội dung mới
-                foreach (var audioFile in existingAudioFiles)
-                {
-                    string newText = GetTextForAudio(worksheet, row, audioFile.Language, options);
-                    if (!string.IsNullOrEmpty(newText))
-                    {
-                        string outputPath = Path.Combine(options.AudioOutputFolder, audioFile.FileName);
-                        var task = CreateAudioFile(newText, outputPath, audioFile.VoiceName);
-                        audioTasks.Add(task);
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Row {row}: Error creating audio for duplicate - {ex.Message}");
-            }
-        }
-
-        // THÊM MỚI: Tạo audio cho new entry với tên file mới
-        private async Task CreateAudioForNewEntry(ExcelWorksheet worksheet, int row, ProcessingOptions options, List<Task> audioTasks)
-        {
-            // Check nếu row có sound formulas
-            if (!CheckRowHasAudioFormulas(worksheet, row, options))
-            {
-                Console.WriteLine($"Row {row}: Skipping audio creation (no sound formulas)");
-                return;
-            }
-
-            // Lấy sound formulas từ Excel
-            var soundFormulas = ExtractAudioFilesFromRow(worksheet, row, options);
-
-            foreach (var audioInfo in soundFormulas)
-            {
-                string text = GetTextForAudio(worksheet, row, ExtractLanguageFromFileName(audioInfo.FileName), options);
-                if (!string.IsNullOrEmpty(text))
-                {
-                    string outputPath = Path.Combine(options.AudioOutputFolder, audioInfo.FileName);
-                    var task = CreateAudioFile(text, outputPath, audioInfo.VoiceName);
-                    audioTasks.Add(task);
-                }
-            }
-        }
-
-        // THÊM MỚI: Lấy text để tạo audio dựa trên language
-        private string GetTextForAudio(ExcelWorksheet worksheet, int row, string language, ProcessingOptions options)
-        {
-            string sourceColumn = GetSourceColumnForLanguage(language, options);
-            int colIndex = GetColumnIndex(sourceColumn);
-            return worksheet.Cells[row, colIndex].Text?.Trim() ?? "";
-        }
-
-        // THÊM MỚI: Tạo vocabulary từ Excel row
-        private Vocabulary CreateVocabularyFromRow(ExcelWorksheet worksheet, int row, ProcessingOptions options)
-        {
-            var vocab = new Vocabulary();
-            string fileType = DetermineFileType(options.FileName);
-
-            switch (fileType.ToLower())
-            {
-                case "english":
-                    vocab.VietnameseText = GetCellValue(worksheet, row, 1);
-                    vocab.EnglishText = GetCellValue(worksheet, row, 2);
-                    break;
-                case "japanese":
-                    vocab.EnglishText = GetCellValue(worksheet, row, 1);
-                    vocab.ReadingText = GetCellValue(worksheet, row, 2);
-                    vocab.JapaneseText = GetCellValue(worksheet, row, 3);
-                    break;
-                case "chinese":
-                    vocab.EnglishText = GetCellValue(worksheet, row, 1);
-                    vocab.ReadingText = GetCellValue(worksheet, row, 2);
-                    vocab.ChineseText = GetCellValue(worksheet, row, 3);
-                    break;
-                case "tuvung":
-                    vocab.VietnameseText = GetCellValue(worksheet, row, 1);
-                    vocab.ReadingText = GetCellValue(worksheet, row, 2);
-                    vocab.JapaneseText = GetCellValue(worksheet, row, 3);
-                    break;
-            }
-
-            return vocab;
-        }
-
-        // THÊM MỚI: Check duplicate cho audio processing
-        private DuplicateCheckResult CheckRowForDuplicateAudio(Vocabulary currentVocab, List<Vocabulary> existingVocabs, List<Vocabulary> processedInSession, ProcessingOptions options)
-        {
-            string fileType = DetermineFileType(options.FileName);
-
-            // CHECK 1: EXACT MATCH trong database
-            var exactMatch = FindExactMatchInDatabase(currentVocab, existingVocabs, fileType);
-            if (exactMatch != null)
-            {
-                return new DuplicateCheckResult
-                {
-                    IsDuplicate = true,
-                    ExistingVocab = exactMatch,
-                    DuplicateSource = "Database",
-                    MatchType = "Exact",
-                    Action = "Skip" // EXACT duplicate KHÔNG tạo audio
-                };
-            }
-
-            // CHECK 2: PARTIAL MATCH trong database  
-            var partialMatch = FindPartialMatchInDatabase(currentVocab, existingVocabs, fileType);
-            if (partialMatch != null)
-            {
-                return new DuplicateCheckResult
-                {
-                    IsDuplicate = true,
-                    ExistingVocab = partialMatch,
-                    DuplicateSource = "Database",
-                    MatchType = "Partial",
-                    Action = "RestoreAndUpdate" // Tạo audio với tên file cũ
-                };
-            }
-
-            // CHECK 3: Current session exact duplicates
-            var sessionExactMatch = FindExactMatchInCurrentSession(currentVocab, processedInSession, fileType);
-            if (sessionExactMatch != null)
-            {
-                return new DuplicateCheckResult
-                {
-                    IsDuplicate = true,
-                    ExistingVocab = sessionExactMatch,
-                    DuplicateSource = "CurrentSession",
-                    MatchType = "Exact",
-                    Action = "Skip" // Session duplicate không tạo audio
-                };
-            }
-
-            // CHECK 4: Current session partial duplicates
-            var sessionPartialMatch = FindPartialMatchInCurrentSession(currentVocab, processedInSession, fileType);
-            if (sessionPartialMatch != null)
-            {
-                return new DuplicateCheckResult
-                {
-                    IsDuplicate = true,
-                    ExistingVocab = sessionPartialMatch,
-                    DuplicateSource = "CurrentSession",
-                    MatchType = "Partial",
-                    Action = "Skip" // Session duplicate không tạo audio
-                };
-            }
-
-            return new DuplicateCheckResult { IsDuplicate = false, Action = "CreateNew" };
-        }
-        // THÊM 2 METHODS NÀY VÀO AzureSpeechService
-        private Vocabulary FindExactMatchInCurrentSession(Vocabulary currentVocab, List<Vocabulary> processedInSession, string fileType)
-        {
-            return fileType.ToLower() switch
-            {
-                "english" => processedInSession.FirstOrDefault(processed =>
-                    SimilarText(processed.VietnameseText, currentVocab.VietnameseText) &&
-                    SimilarText(processed.EnglishText, currentVocab.EnglishText)
-                ),
-
-                "japanese" => processedInSession.FirstOrDefault(processed =>
-                    SimilarText(processed.EnglishText, currentVocab.EnglishText) &&
-                    SimilarText(processed.JapaneseText, currentVocab.JapaneseText)
-                ),
-
-                "chinese" => processedInSession.FirstOrDefault(processed =>
-                    SimilarText(processed.EnglishText, currentVocab.EnglishText) &&
-                    SimilarText(processed.ChineseText, currentVocab.ChineseText)
-                ),
-
-                "tuvung" => processedInSession.FirstOrDefault(processed =>
-                    SimilarText(processed.VietnameseText, currentVocab.VietnameseText) &&
-                    SimilarText(processed.JapaneseText, currentVocab.JapaneseText)
-                ),
-
-                _ => null
-            };
-        }
-
-        private Vocabulary FindPartialMatchInCurrentSession(Vocabulary currentVocab, List<Vocabulary> processedInSession, string fileType)
-        {
-            return fileType.ToLower() switch
-            {
-                "english" => processedInSession.FirstOrDefault(processed =>
-                    SimilarText(processed.VietnameseText, currentVocab.VietnameseText) &&
-                    SimilarText(processed.EnglishText, currentVocab.EnglishText)
-                ),
-
-                "japanese" => processedInSession.FirstOrDefault(processed =>
-                    SimilarText(processed.EnglishText, currentVocab.EnglishText) &&
-                    SimilarText(processed.JapaneseText, currentVocab.JapaneseText)
-                ),
-
-                "chinese" => processedInSession.FirstOrDefault(processed =>
-                    SimilarText(processed.EnglishText, currentVocab.EnglishText) &&
-                    SimilarText(processed.ChineseText, currentVocab.ChineseText)
-                ),
-
-                "tuvung" => processedInSession.FirstOrDefault(processed =>
-                    SimilarText(processed.VietnameseText, currentVocab.VietnameseText) &&
-                    SimilarText(processed.JapaneseText, currentVocab.JapaneseText)
-                ),
-
-                _ => null
-            };
-        }
-        // ORIGINAL METHOD: Check row có audio formulas không
-        private bool CheckRowHasAudioFormulas(ExcelWorksheet worksheet, int row, ProcessingOptions options)
-        {
-            if (string.IsNullOrWhiteSpace(options.SoundColumns)) return false;
-
-            if ((options.FileName.Contains("tuvung") ||
-                 options.FileName.Contains("japanese") ||
-                 options.FileName.Contains("chinese")) && options.SoundColumns.Length == 2)
-            {
-                string col1Value = worksheet.Cells[row, 5].Text?.Trim();
-                string col2Value = worksheet.Cells[row, 6].Text?.Trim();
-
-                return !string.IsNullOrEmpty(col1Value) && !string.IsNullOrEmpty(col2Value) &&
-                       col1Value.Contains("[sound:") && col2Value.Contains("[sound:");
-            }
-            else if (options.FileName.Contains("english") && options.SoundColumns.Length == 2)
-            {
-                int soundCol1 = options.SoundColumns[0] - 'A' + 1;
-                int soundCol2 = options.SoundColumns[1] - 'A' + 1;
-
-                string col1Value = worksheet.Cells[row, soundCol1].Text?.Trim();
-                string col2Value = worksheet.Cells[row, soundCol2].Text?.Trim();
-
-                return !string.IsNullOrEmpty(col1Value) && !string.IsNullOrEmpty(col2Value) &&
-                       col1Value.Contains("[sound:") && col2Value.Contains("[sound:");
-            }
-            else if (options.SoundColumns.Length == 1)
-            {
-                int soundCol = options.SoundColumns[0] - 'A' + 1;
-                string colValue = worksheet.Cells[row, soundCol].Text?.Trim();
-
-                return !string.IsNullOrEmpty(colValue) && colValue.Contains("[sound:");
-            }
-
-            return false;
-        }
-
-        // ORIGINAL METHOD: Extract audio files từ row
-        private List<AudioFileInfo> ExtractAudioFilesFromRow(ExcelWorksheet worksheet, int row, ProcessingOptions options)
-        {
-            var audioFiles = new List<AudioFileInfo>();
-
-            if ((options.FileName.Contains("tuvung") ||
-                 options.FileName.Contains("japanese") ||
-                 options.FileName.Contains("chinese")) && options.SoundColumns.Length == 2)
-            {
-                string col1Formula = worksheet.Cells[row, 5].Text?.Trim(); // Column E
-                string col2Formula = worksheet.Cells[row, 6].Text?.Trim(); // Column F
-
-                if (!string.IsNullOrEmpty(col1Formula) && col1Formula.Contains("[sound:"))
-                {
-                    string fileName = ExtractFileNameFromFormula(col1Formula);
-                    string lang = ExtractLanguageFromFileName(fileName);
-                    string sourceCol = GetSourceColumnForLanguage(lang, options);
-
-                    audioFiles.Add(new AudioFileInfo
-                    {
-                        RowIndex = row,
-                        SourceColumn = sourceCol,
-                        FileName = fileName,
-                        VoiceName = GetVoiceNameForLanguage(lang)
-                    });
-                }
-
-                if (!string.IsNullOrEmpty(col2Formula) && col2Formula.Contains("[sound:"))
-                {
-                    string fileName = ExtractFileNameFromFormula(col2Formula);
-                    string lang = ExtractLanguageFromFileName(fileName);
-                    string sourceCol = GetSourceColumnForLanguage(lang, options);
-
-                    audioFiles.Add(new AudioFileInfo
-                    {
-                        RowIndex = row,
-                        SourceColumn = sourceCol,
-                        FileName = fileName,
-                        VoiceName = GetVoiceNameForLanguage(lang)
-                    });
-                }
-            }
-            else if (options.FileName.Contains("english") && options.SoundColumns.Length == 2)
-            {
-                int soundCol1 = options.SoundColumns[0] - 'A' + 1;
-                int soundCol2 = options.SoundColumns[1] - 'A' + 1;
-
-                string col1Formula = worksheet.Cells[row, soundCol1].Text?.Trim();
-                string col2Formula = worksheet.Cells[row, soundCol2].Text?.Trim();
-
-                if (!string.IsNullOrEmpty(col1Formula) && col1Formula.Contains("[sound:"))
-                {
-                    string fileName = ExtractFileNameFromFormula(col1Formula);
-                    string lang = ExtractLanguageFromFileName(fileName);
-                    string sourceCol = GetSourceColumnForLanguage(lang, options);
-
-                    audioFiles.Add(new AudioFileInfo
-                    {
-                        RowIndex = row,
-                        SourceColumn = sourceCol,
-                        FileName = fileName,
-                        VoiceName = GetVoiceNameForLanguage(lang)
-                    });
-                }
-
-                if (!string.IsNullOrEmpty(col2Formula) && col2Formula.Contains("[sound:"))
-                {
-                    string fileName = ExtractFileNameFromFormula(col2Formula);
-                    string lang = ExtractLanguageFromFileName(fileName);
-                    string sourceCol = GetSourceColumnForLanguage(lang, options);
-
-                    audioFiles.Add(new AudioFileInfo
-                    {
-                        RowIndex = row,
-                        SourceColumn = sourceCol,
-                        FileName = fileName,
-                        VoiceName = GetVoiceNameForLanguage(lang)
-                    });
-                }
-            }
-
-            return audioFiles;
-        }
-
-        // FIXED: Extract language ĐÚNG cho TẤT CẢ trường hợp
-        private string ExtractLanguageFromFileName(string fileName)
-        {
-            // Extract language from filename based on odd/even number
-            if (fileName.Contains("_"))
-            {
-                var parts = fileName.Split('_');
-                if (parts.Length >= 2)
-                {
-                    var numberPart = parts[1].Split('.')[0];
-                    if (int.TryParse(numberPart, out int number))
-                    {
-                        bool isOdd = (number % 2 == 1);
-
-                        // Xác định language dựa vào file type + odd/even
-                        if (fileName.StartsWith("JP-"))
-                        {
-                            // JAPANESE: Lẻ = EN voice, Chẵn = JP voice
-                            return isOdd ? "EN" : "JP";
-                        }
-                        else if (fileName.StartsWith("ZH-"))
-                        {
-                            // CHINESE: Lẻ = EN voice, Chẵn = ZH voice  
-                            return isOdd ? "EN" : "ZH";
-                        }
-                        else if (fileName.StartsWith("Vocab-"))
-                        {
-                            // TUVUNG: Lẻ = EN voice, Chẵn = VI voice
-                            return isOdd ? "EN" : "VI";
-                        }
-                        else if (fileName.StartsWith("EN-"))
-                        {
-                            // ENGLISH: Lẻ = VI voice, Chẵn = EN voice (NGƯỢC với các loại khác)
-                            return isOdd ? "VI" : "EN";
-                        }
-                    }
-                }
-            }
-
-            return "EN"; // Default
-        }
-
-        // FIXED: GetSourceColumnForLanguage cho TẤT CẢ trường hợp
-        private string GetSourceColumnForLanguage(string language, ProcessingOptions options)
-        {
-            if (options.FileName.Contains("tuvung"))
-            {
-                // TUVUNG: Cả EN và VI voice đều đọc Vietnamese text từ Column A
-                return "A";
-            }
-            else if (options.FileName.Contains("japanese"))
-            {
-                // JAPANESE LOGIC CŨ: EN voice đọc English (A), JP voice đọc Japanese (C)
-                return language switch
-                {
-                    "EN" => "A", // English voice đọc English text từ Column A
-                    "JP" => "C", // Japanese voice đọc Japanese text từ Column C  
-                    _ => "A"
-                };
-            }
-            else if (options.FileName.Contains("chinese"))
-            {
-                // CHINESE LOGIC CŨ: EN voice đọc English (A), ZH voice đọc Chinese (C)
-                return language switch
-                {
-                    "EN" => "A", // English voice đọc English text từ Column A
-                    "ZH" => "C", // Chinese voice đọc Chinese text từ Column C
-                    _ => "A"
-                };
-            }
-            else if (options.FileName.Contains("english"))
-            {
-                // ENGLISH LOGIC CŨ: VI voice đọc Vietnamese (A), EN voice đọc English (B)
-                return language switch
-                {
-                    "VI" => "A", // Vietnamese voice đọc Vietnamese text từ Column A
-                    "EN" => "B", // English voice đọc English text từ Column B
-                    _ => "A"
-                };
-            }
-
-            return "A"; // Default
-        }
-
-        private string GetVoiceNameForLanguage(string language)
-        {
-            return language switch
-            {
-                "EN" => "en-US-JennyNeural",
-                "VI" => "vi-VN-HoaiMyNeural",
-                "JP" => "ja-JP-NanamiNeural",
-                "ZH" => "zh-CN-XiaoxiaoNeural",
-                _ => "en-US-JennyNeural"
-            };
-        }
-
-        private string ExtractFileNameFromFormula(string formula)
-        {
-            int start = formula.IndexOf("[sound:") + 7;
-            int end = formula.IndexOf("]", start);
-            if (start > 6 && end > start)
-            {
-                return formula.Substring(start, end - start);
-            }
-            return "";
-        }
-
-        // THÊM MỚI: Helper methods
-        private string GetCellValue(ExcelWorksheet worksheet, int row, int column)
-        {
-            var value = worksheet.Cells[row, column].Text?.Trim();
-            return string.IsNullOrEmpty(value) ? "" : value;
-        }
-
-        private bool SimilarText(string text1, string text2)
-        {
-            if (string.IsNullOrWhiteSpace(text1) || string.IsNullOrWhiteSpace(text2))
-                return false;
-            return text1.Trim().Equals(text2.Trim(), StringComparison.OrdinalIgnoreCase);
-        }
-
-        private string DetermineFileType(string fileName)
-        {
-            fileName = fileName.ToLower();
-            if (fileName.Contains("english")) return "English";
-            if (fileName.Contains("japanese")) return "Japanese";
-            if (fileName.Contains("chinese")) return "Chinese";
-            if (fileName.Contains("tuvung")) return "TuVung";
-            return "Unknown";
-        }
-        // THÊM CÁC METHOD NÀY VÀO CUỐI CLASS AzureSpeechService (trước DuplicateCheckResult class)
 
         private Vocabulary FindExactMatchInDatabase(Vocabulary currentVocab, List<Vocabulary> existingVocabs, string fileType)
         {
@@ -919,21 +953,75 @@ namespace Text_to_Image.Services
             };
         }
 
-        private Vocabulary FindExactOrPartialMatchInCurrentSession(Vocabulary currentVocab, List<Vocabulary> processedInSession, string fileType)
+        private Vocabulary FindExactMatchInCurrentSession(Vocabulary currentVocab, List<Vocabulary> processedInSession, string fileType)
         {
-            // Sử dụng logic OR (any match) cho current session
-            return processedInSession.FirstOrDefault(processed =>
-                SimilarText(processed.EnglishText, currentVocab.EnglishText) ||
-                SimilarText(processed.VietnameseText, currentVocab.VietnameseText) ||
-                SimilarText(processed.JapaneseText, currentVocab.JapaneseText) ||
-                SimilarText(processed.ChineseText, currentVocab.ChineseText)
-            );
+            return fileType.ToLower() switch
+            {
+                "english" => processedInSession.FirstOrDefault(processed =>
+                    SimilarText(processed.VietnameseText, currentVocab.VietnameseText) &&
+                    SimilarText(processed.EnglishText, currentVocab.EnglishText)
+                ),
+
+                "japanese" => processedInSession.FirstOrDefault(processed =>
+                    SimilarText(processed.EnglishText, currentVocab.EnglishText) &&
+                    SimilarText(processed.JapaneseText, currentVocab.JapaneseText)
+                ),
+
+                "chinese" => processedInSession.FirstOrDefault(processed =>
+                    SimilarText(processed.EnglishText, currentVocab.EnglishText) &&
+                    SimilarText(processed.ChineseText, currentVocab.ChineseText)
+                ),
+
+                "tuvung" => processedInSession.FirstOrDefault(processed =>
+                    SimilarText(processed.VietnameseText, currentVocab.VietnameseText) &&
+                    SimilarText(processed.JapaneseText, currentVocab.JapaneseText)
+                ),
+
+                _ => null
+            };
         }
 
-        // Method để test SSML output (có thể dùng để debug)
+        private Vocabulary FindPartialMatchInCurrentSession(Vocabulary currentVocab, List<Vocabulary> processedInSession, string fileType)
+        {
+            return fileType.ToLower() switch
+            {
+                "english" => processedInSession.FirstOrDefault(processed =>
+                    SimilarText(processed.VietnameseText, currentVocab.VietnameseText) &&
+                    SimilarText(processed.EnglishText, currentVocab.EnglishText)
+                ),
+
+                "japanese" => processedInSession.FirstOrDefault(processed =>
+                    SimilarText(processed.EnglishText, currentVocab.EnglishText) &&
+                    SimilarText(processed.JapaneseText, currentVocab.JapaneseText)
+                ),
+
+                "chinese" => processedInSession.FirstOrDefault(processed =>
+                    SimilarText(processed.EnglishText, currentVocab.EnglishText) &&
+                    SimilarText(processed.ChineseText, currentVocab.ChineseText)
+                ),
+
+                "tuvung" => processedInSession.FirstOrDefault(processed =>
+                    SimilarText(processed.VietnameseText, currentVocab.VietnameseText) &&
+                    SimilarText(processed.JapaneseText, currentVocab.JapaneseText)
+                ),
+
+                _ => null
+            };
+        }
+
+        #endregion
+
         public string GetSSMLPreview(string text, string voiceName)
         {
-            return CreateSSMLForLearners(text, voiceName);
+            var languageCode = GetLanguageCode(voiceName);
+            var optimizedText = OptimizeTextForLearners(text, languageCode);
+            return $"Google Translate TTS: {optimizedText} (Language: {languageCode})";
+        }
+
+        public void Dispose()
+        {
+            _httpClient?.Dispose();
+            _semaphore?.Dispose();
         }
 
         // Helper classes
@@ -945,12 +1033,21 @@ namespace Text_to_Image.Services
             public string MatchType { get; set; } = ""; // "Exact" or "Partial"  
             public string Action { get; set; } = ""; // "Skip", "RestoreAndUpdate", "Clear", "CreateNew"
         }
+
         public class AudioProcessingInfo
         {
             public Vocabulary Vocabulary { get; set; }
             public DuplicateCheckResult DuplicateResult { get; set; }
             public int RowNumber { get; set; }
             public bool HasAudioFormulas { get; set; }
+        }
+
+        public class AudioFileInfo
+        {
+            public int RowIndex { get; set; }
+            public string SourceColumn { get; set; }
+            public string FileName { get; set; }
+            public string VoiceName { get; set; }
         }
     }
 }

@@ -1,4 +1,4 @@
-﻿using Microsoft.CognitiveServices.Speech;
+﻿using Google.Cloud.TextToSpeech.V1;
 using OfficeOpenXml;
 using Text_to_Image.Models;
 using Text_to_Image.Data.Models;
@@ -7,20 +7,18 @@ using Text_to_Image.Data;
 
 namespace Text_to_Image.Services
 {
-    public class AzureSpeechService : ISpeechService
+    public class GoogleSpeechService : ISpeechService
     {
-        private readonly string _speechKey;
-        private readonly string _speechRegion;
-        private readonly SpeechConfig _speechConfig;
+        private readonly TextToSpeechClient _client;
+        private readonly string _credentialsPath;
 
-        public AzureSpeechService(string speechKey, string speechRegion)
+        public GoogleSpeechService(string credentialsPath)
         {
-            _speechKey = speechKey;
-            _speechRegion = speechRegion;
-            _speechConfig = SpeechConfig.FromSubscription(_speechKey, _speechRegion);
+            _credentialsPath = credentialsPath;
 
-            // Set output format to MP3
-            _speechConfig.SetSpeechSynthesisOutputFormat(SpeechSynthesisOutputFormat.Audio16Khz32KBitRateMonoMp3);
+            // Thiết lập credentials cho Google Cloud
+            Environment.SetEnvironmentVariable("GOOGLE_APPLICATION_CREDENTIALS", credentialsPath);
+            _client = TextToSpeechClient.Create();
         }
 
         private int GetColumnIndex(string columnLetter)
@@ -36,99 +34,149 @@ namespace Text_to_Image.Services
             return result;
         }
 
-        // Tạo file âm thanh từ text với giọng nói tùy chọn - CÓ CHẤT LƯỢNG CHO NGƯỜI MỚI HỌC
-        public async Task<bool> CreateAudioFile(string text, string outputPath, string voiceName = "en-US-JennyNeural")
+        // Tạo file âm thanh từ text với Google TTS - CÓ CHẤT LƯỢNG CHO NGƯỜI MỚI HỌC
+        public async Task<bool> CreateAudioFile(string text, string outputPath, string voiceName = "en-US-Wavenet-J")
         {
-            try
+            int maxRetries = 3;
+            int retryDelay = 2000; // 2 seconds
+
+            for (int attempt = 0; attempt < maxRetries; attempt++)
             {
-                if (string.IsNullOrWhiteSpace(text))
+                try
                 {
-                    return false;
-                }
+                    if (string.IsNullOrWhiteSpace(text))
+                    {
+                        return false;
+                    }
 
-                _speechConfig.SpeechSynthesisVoiceName = voiceName;
+                    // Tạo thư mục nếu chưa tồn tại
+                    string directory = Path.GetDirectoryName(outputPath);
+                    if (!Directory.Exists(directory))
+                    {
+                        Directory.CreateDirectory(directory);
+                    }
 
-                // Tạo thư mục nếu chưa tồn tại
-                string directory = Path.GetDirectoryName(outputPath);
-                if (!Directory.Exists(directory))
-                {
-                    Directory.CreateDirectory(directory);
-                }
+                    // Tạo SSML với cấu hình phù hợp cho người mới học
+                    string ssmlText = CreateSSMLForLearners(text, voiceName);
 
-                // Tạo SSML với cấu hình phù hợp cho người mới học
-                string ssmlText = CreateSSMLForLearners(text, voiceName);
+                    // Thiết lập input text
+                    var input = new SynthesisInput()
+                    {
+                        Ssml = ssmlText
+                    };
 
-                // Sử dụng synthesizer mà không cần AudioConfig để lấy raw audio data
-                using var synthesizer = new SpeechSynthesizer(_speechConfig, null);
+                    // Thiết lập voice
+                    var voice = GetGoogleVoiceConfig(voiceName);
 
-                var result = await synthesizer.SpeakSsmlAsync(ssmlText);
+                    // Thiết lập audio config - MP3 format
+                    var config = new AudioConfig()
+                    {
+                        AudioEncoding = AudioEncoding.Mp3,
+                        SampleRateHertz = 22050
+                    };
 
-                if (result.Reason == ResultReason.SynthesizingAudioCompleted)
-                {
+                    // Tạo speech synthesis request
+                    var response = await _client.SynthesizeSpeechAsync(input, voice, config);
+
                     // Lưu audio data trực tiếp thành file MP3
-                    await File.WriteAllBytesAsync(outputPath, result.AudioData);
-                    Console.WriteLine($"✓ [AZURE] {Path.GetFileName(outputPath)}");
+                    await File.WriteAllBytesAsync(outputPath, response.AudioContent.ToByteArray());
+                    Console.WriteLine($"✓ [GOOGLE] {Path.GetFileName(outputPath)}");
                     return true;
                 }
-                else if (result.Reason == ResultReason.Canceled)
+                catch (Exception ex)
                 {
-                    var cancellation = SpeechSynthesisCancellationDetails.FromResult(result);
-                    Console.WriteLine($"✗ {Path.GetFileName(outputPath)}: {cancellation.Reason}");
-                }
+                    if (attempt < maxRetries - 1 && ex.Message.Contains("PermissionDenied"))
+                    {
+                        Console.WriteLine($"⏳ [GOOGLE] {Path.GetFileName(outputPath)}: Retrying in {retryDelay / 1000}s... (Attempt {attempt + 1}/{maxRetries})");
+                        await Task.Delay(retryDelay);
+                        retryDelay *= 2; // Exponential backoff
+                        continue;
+                    }
 
-                return false;
+                    Console.WriteLine($"✗ [GOOGLE] {Path.GetFileName(outputPath)}: {ex.Message}");
+                    return false;
+                }
             }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"✗ {Path.GetFileName(outputPath)}: {ex.Message}");
-                return false;
-            }
+
+            return false;
         }
 
         // Tạo SSML với cấu hình tối ưu cho người mới học
         private string CreateSSMLForLearners(string text, string voiceName)
         {
             // Xác định tốc độ đọc và style dựa trên giọng nói
-            string rate = "1.0"; // Tốc độ bình thường cho tiếng Việt
-            string style = "";
+            string rate = "0.9"; // Tốc độ bình thường cho tiếng Việt
 
             // Cấu hình tùy chỉnh cho từng ngôn ngữ
             if (voiceName.Contains("en-US") || voiceName.Contains("en-GB"))
             {
                 rate = "0.75"; // Tiếng Anh đọc chậm hơn nữa
-                style = @"style=""calm"""; // Giọng điềm tĩnh cho tiếng Anh
             }
             else if (voiceName.Contains("ja-JP"))
             {
                 rate = "0.7"; // Tiếng Nhật đọc rất chậm
-                style = @"style=""calm"""; // Giọng điềm tĩnh
             }
             else if (voiceName.Contains("zh-CN") || voiceName.Contains("zh-TW"))
             {
                 rate = "0.7"; // Tiếng Trung đọc rất chậm
-                style = @"style=""calm"""; // Giọng điềm tĩnh
             }
             else if (voiceName.Contains("vi-VN"))
             {
                 rate = "1.0"; // Tiếng Việt đọc bình thường - KHÔNG CHẬM
-                style = @"style=""calm"""; // Giọng điềm tĩnh
             }
 
             // Escape XML characters trong text
             string escapedText = System.Security.SecurityElement.Escape(text);
 
             // Tạo SSML với silent đầu/cuối và tốc độ phù hợp
-            string ssml = $@"<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='en-US'>
-                <voice name='{voiceName}'>
+            string ssml = $@"<speak>
                 <break time='200ms'/>
-                <prosody rate='{rate}' {style}>
+                <prosody rate='{rate}'>
                 {escapedText}
                 </prosody>
                 <break time='300ms'/>
-                </voice>
                 </speak>";
 
             return ssml;
+        }
+
+        // TÌM METHOD NÀY VÀ THAY THẾ
+        private VoiceSelectionParams GetGoogleVoiceConfig(string voiceName)
+        {
+            var voice = new VoiceSelectionParams();
+
+            if (voiceName.Contains("en-US") || voiceName.Contains("EN"))
+            {
+                voice.LanguageCode = "en-US";
+                voice.Name = "en-US-Standard-C";  // GOOGLE TRANSLATE VOICE
+                voice.SsmlGender = SsmlVoiceGender.Female;
+            }
+            else if (voiceName.Contains("vi-VN") || voiceName.Contains("VI"))
+            {
+                voice.LanguageCode = "vi-VN";
+                voice.Name = "vi-VN-Standard-A";  // GOOGLE TRANSLATE VOICE
+                voice.SsmlGender = SsmlVoiceGender.Female;
+            }
+            else if (voiceName.Contains("ja-JP") || voiceName.Contains("JP"))
+            {
+                voice.LanguageCode = "ja-JP";
+                voice.Name = "ja-JP-Standard-A";  // GOOGLE TRANSLATE VOICE
+                voice.SsmlGender = SsmlVoiceGender.Female;
+            }
+            else if (voiceName.Contains("cmn-CN") || voiceName.Contains("ZH"))
+            {
+                voice.LanguageCode = "cmn-CN";
+                voice.Name = "cmn-CN-Standard-A"; // GOOGLE TRANSLATE VOICE
+                voice.SsmlGender = SsmlVoiceGender.Female;
+            }
+            else
+            {
+                voice.LanguageCode = "en-US";
+                voice.Name = "en-US-Standard-C";
+                voice.SsmlGender = SsmlVoiceGender.Female;
+            }
+
+            return voice;
         }
 
         // MAIN METHOD: Process Excel for Audio với logic duplicate mới
@@ -136,7 +184,7 @@ namespace Text_to_Image.Services
         {
             try
             {
-                Console.WriteLine("Creating audio files with AZURE TTS...");
+                Console.WriteLine("Creating audio files with GOOGLE Text-to-Speech...");
 
                 string dateToUse = string.IsNullOrWhiteSpace(options.CustomDate) ?
                     DateTime.Now.ToString("dd-MM-yyyy") : options.CustomDate;
@@ -217,7 +265,7 @@ namespace Text_to_Image.Services
                 // Execute tất cả audio tasks
                 if (audioTasks.Count > 0)
                 {
-                    Console.WriteLine($"Creating {audioTasks.Count} audio files with optimized settings for learners...");
+                    Console.WriteLine($"Creating {audioTasks.Count} audio files with Google TTS optimized for learners...");
 
                     // Tạo âm thanh song song (giới hạn 3 files cùng lúc để tránh quá tải API)
                     var semaphore = new SemaphoreSlim(3);
@@ -237,14 +285,14 @@ namespace Text_to_Image.Services
                     await Task.WhenAll(tasks);
                     semaphore.Dispose();
 
-                    Console.WriteLine($"Completed! Created {audioTasks.Count} audio files with learner-friendly settings.");
+                    Console.WriteLine($"Completed! Created {audioTasks.Count} audio files with Google TTS.");
                 }
                 else
                 {
                     Console.WriteLine("No audio files to create.");
                 }
 
-                Console.WriteLine("All audio files have been created successfully.");
+                Console.WriteLine("All audio files have been created successfully with GOOGLE Text-to-Speech.");
             }
             catch (Exception ex)
             {
@@ -252,6 +300,7 @@ namespace Text_to_Image.Services
                 throw;
             }
         }
+
         private void ApplyAudioConflictResolutionLogic(List<AudioProcessingInfo> processingResults, List<Vocabulary> existingVocabs, ProcessingOptions options)
         {
             string fileType = DetermineFileType(options.FileName);
@@ -298,6 +347,7 @@ namespace Text_to_Image.Services
                 }
             }
         }
+
         private bool SimilarVocabulary(Vocabulary vocab1, Vocabulary vocab2, string fileType)
         {
             return fileType.ToLower() switch
@@ -313,6 +363,7 @@ namespace Text_to_Image.Services
                 _ => false
             };
         }
+
         private List<string> GetConflictFields(Vocabulary current, Vocabulary existing, string fileType)
         {
             var conflicts = new List<string>();
@@ -357,7 +408,6 @@ namespace Text_to_Image.Services
             return conflicts;
         }
 
-
         private async Task ExecuteAudioCreationActions(ExcelWorksheet worksheet, List<AudioProcessingInfo> processingResults, ProcessingOptions options, List<Task> audioTasks)
         {
             foreach (var info in processingResults)
@@ -390,7 +440,6 @@ namespace Text_to_Image.Services
             }
         }
 
-
         // THÊM MỚI: Tạo audio cho database duplicate với tên file cũ
         private async Task CreateAudioForDatabaseDuplicate(ExcelWorksheet worksheet, int row, Vocabulary existingVocab, ProcessingOptions options, List<Task> audioTasks)
         {
@@ -406,7 +455,7 @@ namespace Text_to_Image.Services
                     return;
                 }
 
-                Console.WriteLine($"Row {row}: Creating audio with OLD filenames but NEW content");
+                Console.WriteLine($"Row {row}: Creating audio with OLD filenames but NEW content using Google TTS");
 
                 // Tạo audio cho từng file cũ với nội dung mới
                 foreach (var audioFile in existingAudioFiles)
@@ -415,7 +464,8 @@ namespace Text_to_Image.Services
                     if (!string.IsNullOrEmpty(newText))
                     {
                         string outputPath = Path.Combine(options.AudioOutputFolder, audioFile.FileName);
-                        var task = CreateAudioFile(newText, outputPath, audioFile.VoiceName);
+                        string googleVoiceName = ConvertAzureToGoogleVoice(audioFile.VoiceName);
+                        var task = CreateAudioFile(newText, outputPath, googleVoiceName);
                         audioTasks.Add(task);
                     }
                 }
@@ -445,7 +495,8 @@ namespace Text_to_Image.Services
                 if (!string.IsNullOrEmpty(text))
                 {
                     string outputPath = Path.Combine(options.AudioOutputFolder, audioInfo.FileName);
-                    var task = CreateAudioFile(text, outputPath, audioInfo.VoiceName);
+                    string googleVoiceName = GetGoogleVoiceNameForLanguage(ExtractLanguageFromFileName(audioInfo.FileName));
+                    var task = CreateAudioFile(text, outputPath, googleVoiceName);
                     audioTasks.Add(task);
                 }
             }
@@ -554,7 +605,8 @@ namespace Text_to_Image.Services
 
             return new DuplicateCheckResult { IsDuplicate = false, Action = "CreateNew" };
         }
-        // THÊM 2 METHODS NÀY VÀO AzureSpeechService
+
+        // THÊM 2 METHODS NÀY VÀO GoogleSpeechService
         private Vocabulary FindExactMatchInCurrentSession(Vocabulary currentVocab, List<Vocabulary> processedInSession, string fileType)
         {
             return fileType.ToLower() switch
@@ -610,6 +662,7 @@ namespace Text_to_Image.Services
                 _ => null
             };
         }
+
         // ORIGINAL METHOD: Check row có audio formulas không
         private bool CheckRowHasAudioFormulas(ExcelWorksheet worksheet, int row, ProcessingOptions options)
         {
@@ -670,7 +723,7 @@ namespace Text_to_Image.Services
                         RowIndex = row,
                         SourceColumn = sourceCol,
                         FileName = fileName,
-                        VoiceName = GetVoiceNameForLanguage(lang)
+                        VoiceName = GetGoogleVoiceNameForLanguage(lang)
                     });
                 }
 
@@ -685,7 +738,7 @@ namespace Text_to_Image.Services
                         RowIndex = row,
                         SourceColumn = sourceCol,
                         FileName = fileName,
-                        VoiceName = GetVoiceNameForLanguage(lang)
+                        VoiceName = GetGoogleVoiceNameForLanguage(lang)
                     });
                 }
             }
@@ -708,7 +761,7 @@ namespace Text_to_Image.Services
                         RowIndex = row,
                         SourceColumn = sourceCol,
                         FileName = fileName,
-                        VoiceName = GetVoiceNameForLanguage(lang)
+                        VoiceName = GetGoogleVoiceNameForLanguage(lang)
                     });
                 }
 
@@ -723,7 +776,7 @@ namespace Text_to_Image.Services
                         RowIndex = row,
                         SourceColumn = sourceCol,
                         FileName = fileName,
-                        VoiceName = GetVoiceNameForLanguage(lang)
+                        VoiceName = GetGoogleVoiceNameForLanguage(lang)
                     });
                 }
             }
@@ -773,6 +826,32 @@ namespace Text_to_Image.Services
             return "EN"; // Default
         }
 
+        // Cập nhật voice names cho Google TTS
+        private string GetGoogleVoiceNameForLanguage(string language)
+        {
+            return language switch
+            {
+                "EN" => "en-US-Standard-C",      // GOOGLE TRANSLATE
+                "VI" => "vi-VN-Standard-A",      // GOOGLE TRANSLATE
+                "JP" => "ja-JP-Standard-A",      // GOOGLE TRANSLATE
+                "ZH" => "cmn-CN-Standard-A",     // GOOGLE TRANSLATE
+                _ => "en-US-Standard-C"
+            };
+        }
+
+        // Helper method để convert Azure voice names sang Google voice names
+        private string ConvertAzureToGoogleVoice(string azureVoiceName)
+        {
+            return azureVoiceName switch
+            {
+                "en-US-JennyNeural" => "en-US-Wavenet-J",
+                "vi-VN-HoaiMyNeural" => "vi-VN-Wavenet-A",
+                "ja-JP-NanamiNeural" => "ja-JP-Wavenet-A",
+                "zh-CN-XiaoxiaoNeural" => "cmn-CN-Wavenet-A",
+                _ => "en-US-Wavenet-J"
+            };
+        }
+
         // FIXED: GetSourceColumnForLanguage cho TẤT CẢ trường hợp
         private string GetSourceColumnForLanguage(string language, ProcessingOptions options)
         {
@@ -815,18 +894,6 @@ namespace Text_to_Image.Services
             return "A"; // Default
         }
 
-        private string GetVoiceNameForLanguage(string language)
-        {
-            return language switch
-            {
-                "EN" => "en-US-JennyNeural",
-                "VI" => "vi-VN-HoaiMyNeural",
-                "JP" => "ja-JP-NanamiNeural",
-                "ZH" => "zh-CN-XiaoxiaoNeural",
-                _ => "en-US-JennyNeural"
-            };
-        }
-
         private string ExtractFileNameFromFormula(string formula)
         {
             int start = formula.IndexOf("[sound:") + 7;
@@ -861,7 +928,8 @@ namespace Text_to_Image.Services
             if (fileName.Contains("tuvung")) return "TuVung";
             return "Unknown";
         }
-        // THÊM CÁC METHOD NÀY VÀO CUỐI CLASS AzureSpeechService (trước DuplicateCheckResult class)
+
+        // THÊM CÁC METHOD NÀY VÀO CUỐI CLASS GoogleSpeechService (trước DuplicateCheckResult class)
 
         private Vocabulary FindExactMatchInDatabase(Vocabulary currentVocab, List<Vocabulary> existingVocabs, string fileType)
         {
@@ -919,17 +987,6 @@ namespace Text_to_Image.Services
             };
         }
 
-        private Vocabulary FindExactOrPartialMatchInCurrentSession(Vocabulary currentVocab, List<Vocabulary> processedInSession, string fileType)
-        {
-            // Sử dụng logic OR (any match) cho current session
-            return processedInSession.FirstOrDefault(processed =>
-                SimilarText(processed.EnglishText, currentVocab.EnglishText) ||
-                SimilarText(processed.VietnameseText, currentVocab.VietnameseText) ||
-                SimilarText(processed.JapaneseText, currentVocab.JapaneseText) ||
-                SimilarText(processed.ChineseText, currentVocab.ChineseText)
-            );
-        }
-
         // Method để test SSML output (có thể dùng để debug)
         public string GetSSMLPreview(string text, string voiceName)
         {
@@ -945,12 +1002,21 @@ namespace Text_to_Image.Services
             public string MatchType { get; set; } = ""; // "Exact" or "Partial"  
             public string Action { get; set; } = ""; // "Skip", "RestoreAndUpdate", "Clear", "CreateNew"
         }
+
         public class AudioProcessingInfo
         {
             public Vocabulary Vocabulary { get; set; }
             public DuplicateCheckResult DuplicateResult { get; set; }
             public int RowNumber { get; set; }
             public bool HasAudioFormulas { get; set; }
+        }
+
+        public class AudioFileInfo
+        {
+            public int RowIndex { get; set; }
+            public string SourceColumn { get; set; }
+            public string FileName { get; set; }
+            public string VoiceName { get; set; }
         }
     }
 }

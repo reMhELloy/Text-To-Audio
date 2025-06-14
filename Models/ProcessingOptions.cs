@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using Text_to_Image.Services;
 
 namespace Text_to_Image.Models
 {
@@ -35,6 +36,10 @@ namespace Text_to_Image.Models
 
         // Audio file type để xác định logic xử lý
         public string AudioFileType { get; set; }
+        // NEW: Speech service selection
+        public SpeechServiceType SpeechServiceType { get; set; } = SpeechServiceType.Azure;
+
+        public string PreferredSpeechService { get; set; } = "azure";
 
 
         public ProcessingOptions()
