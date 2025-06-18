@@ -4,6 +4,7 @@ using Text_to_Image.Models;
 using Text_to_Image.Data.Models;
 using Text_to_Image.Services;
 using Text_to_Image.Data;
+using static Text_to_Image.Services.GoogleTranslateTTSService;
 
 namespace Text_to_Image.Services
 {
@@ -214,7 +215,7 @@ namespace Text_to_Image.Services
                     return;
                 }
 
-                var audioTasks = new List<Task>();
+                var audioInfoList = new List<AudioCreationInfo>();
                 var processedInSession = new List<Vocabulary>();
                 var processingResults = new List<AudioProcessingInfo>();
 
@@ -260,39 +261,46 @@ namespace Text_to_Image.Services
 
                 // PHASE 3: Execute audio creation based on processing results
                 Console.WriteLine("PHASE 3: Executing audio creation actions...");
-                await ExecuteAudioCreationActions(worksheet, processingResults, options, audioTasks);
+                await CollectAudioCreationInformation(worksheet, processingResults, options, audioInfoList);
 
-                // Execute tất cả audio tasks
-                if (audioTasks.Count > 0)
+                if (audioInfoList.Count > 0)
                 {
-                    Console.WriteLine($"Creating {audioTasks.Count} audio files with Google TTS optimized for learners...");
+                    // Sắp xếp theo filename để đảm bảo thứ tự
+                    var sortedAudioList = audioInfoList
+                        .OrderBy(info => ExtractNumberFromFileName(info.FileName))
+                        .ThenBy(info => info.FileName)
+                        .ToList();
 
-                    // Tạo âm thanh song song (giới hạn 3 files cùng lúc để tránh quá tải API)
-                    var semaphore = new SemaphoreSlim(3);
-                    var tasks = audioTasks.Select(async task =>
+                    Console.WriteLine("=== AUDIO FILES ORDER ===");
+                    for (int i = 0; i < sortedAudioList.Count; i++)
                     {
-                        await semaphore.WaitAsync();
-                        try
-                        {
-                            await task;
-                        }
-                        finally
-                        {
-                            semaphore.Release();
-                        }
-                    });
+                        Console.WriteLine($"{i + 1:D2}. {sortedAudioList[i].FileName}");
+                    }
+                    Console.WriteLine("==========================");
 
-                    await Task.WhenAll(tasks);
-                    semaphore.Dispose();
+                    Console.WriteLine($"Creating {sortedAudioList.Count} audio files sequentially with Google TTS...");
 
-                    Console.WriteLine($"Completed! Created {audioTasks.Count} audio files with Google TTS.");
+                    // Tạo từng file theo thứ tự đã sắp xếp
+                    for (int i = 0; i < sortedAudioList.Count; i++)
+                    {
+                        var audioInfo = sortedAudioList[i];
+                        Console.WriteLine($"[{i + 1:D2}/{sortedAudioList.Count:D2}] {audioInfo.FileName}");
+
+                        bool success = await CreateAudioFile(audioInfo.Text, audioInfo.OutputPath, audioInfo.VoiceName);
+                        if (!success)
+                        {
+                            Console.WriteLine($"✗ FAILED: {audioInfo.FileName}");
+                        }
+                        await Task.Delay(100);
+                    }
+
+                    Console.WriteLine($"Completed! Created {sortedAudioList.Count} audio files with Google TTS.");
                 }
                 else
                 {
                     Console.WriteLine("No audio files to create.");
                 }
 
-                Console.WriteLine("All audio files have been created successfully with GOOGLE Text-to-Speech.");
             }
             catch (Exception ex)
             {
@@ -407,86 +415,59 @@ namespace Text_to_Image.Services
 
             return conflicts;
         }
-
-        private async Task ExecuteAudioCreationActions(ExcelWorksheet worksheet, List<AudioProcessingInfo> processingResults, ProcessingOptions options, List<Task> audioTasks)
+        private async Task CollectAudioCreationInformation(ExcelWorksheet worksheet, List<AudioProcessingInfo> processingResults, ProcessingOptions options, List<AudioCreationInfo> audioInfoList)
         {
             foreach (var info in processingResults)
             {
-                if (!info.HasAudioFormulas)
-                {
-                    Console.WriteLine($"Row {info.RowNumber}: Skipping audio creation (no sound formulas)");
-                    continue;
-                }
+                if (!info.HasAudioFormulas) continue;
 
                 switch (info.DuplicateResult.Action)
                 {
                     case "Skip":
-                        string reason = info.DuplicateResult.MatchType == "Exact" ? "exact duplicate" : "duplicate in current session";
-                        Console.WriteLine($"Row {info.RowNumber}: SKIPPED - {reason}");
                         break;
-
                     case "RestoreAndUpdate":
-                        Console.WriteLine($"Row {info.RowNumber}: PARTIAL DUPLICATE - creating audio with old filenames");
-                        await CreateAudioForDatabaseDuplicate(worksheet, info.RowNumber, info.DuplicateResult.ExistingVocab, options, audioTasks);
+                        await CollectAudioInfoForDatabaseDuplicate(worksheet, info.RowNumber, info.DuplicateResult.ExistingVocab, options, audioInfoList);
                         break;
-
                     case "CreateNew":
                     case "CreateNewConflict":
-                        string actionType = info.DuplicateResult.Action == "CreateNewConflict" ? "CONFLICT" : "NEW ENTRY";
-                        Console.WriteLine($"Row {info.RowNumber}: {actionType} - creating audio with new filenames");
-                        await CreateAudioForNewEntry(worksheet, info.RowNumber, options, audioTasks);
+                        await CollectAudioInfoForNewEntry(worksheet, info.RowNumber, options, audioInfoList);
                         break;
                 }
             }
         }
 
-        // THÊM MỚI: Tạo audio cho database duplicate với tên file cũ
-        private async Task CreateAudioForDatabaseDuplicate(ExcelWorksheet worksheet, int row, Vocabulary existingVocab, ProcessingOptions options, List<Task> audioTasks)
+        private async Task CollectAudioInfoForDatabaseDuplicate(ExcelWorksheet worksheet, int row, Vocabulary existingVocab, ProcessingOptions options, List<AudioCreationInfo> audioInfoList)
         {
             try
             {
-                // Lấy audio files cũ từ database
                 using var dbService = new DatabaseService();
                 var existingAudioFiles = await dbService.GetAudioFilesByVocabIdAsync(existingVocab.VocabId);
+                if (existingAudioFiles == null || existingAudioFiles.Count == 0) return;
 
-                if (existingAudioFiles == null || existingAudioFiles.Count == 0)
-                {
-                    Console.WriteLine($"Row {row}: No existing audio files found - skipping audio creation");
-                    return;
-                }
-
-                Console.WriteLine($"Row {row}: Creating audio with OLD filenames but NEW content using Google TTS");
-
-                // Tạo audio cho từng file cũ với nội dung mới
                 foreach (var audioFile in existingAudioFiles)
                 {
                     string newText = GetTextForAudio(worksheet, row, audioFile.Language, options);
                     if (!string.IsNullOrEmpty(newText))
                     {
-                        string outputPath = Path.Combine(options.AudioOutputFolder, audioFile.FileName);
                         string googleVoiceName = ConvertAzureToGoogleVoice(audioFile.VoiceName);
-                        var task = CreateAudioFile(newText, outputPath, googleVoiceName);
-                        audioTasks.Add(task);
+                        audioInfoList.Add(new AudioCreationInfo
+                        {
+                            FileName = audioFile.FileName,
+                            Text = newText,
+                            OutputPath = Path.Combine(options.AudioOutputFolder, audioFile.FileName),
+                            VoiceName = googleVoiceName,
+                            RowNumber = row
+                        });
                     }
                 }
             }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Row {row}: Error creating audio for duplicate - {ex.Message}");
-            }
+            catch { }
         }
 
-        // THÊM MỚI: Tạo audio cho new entry với tên file mới
-        private async Task CreateAudioForNewEntry(ExcelWorksheet worksheet, int row, ProcessingOptions options, List<Task> audioTasks)
+        private async Task CollectAudioInfoForNewEntry(ExcelWorksheet worksheet, int row, ProcessingOptions options, List<AudioCreationInfo> audioInfoList)
         {
-            // Check nếu row có sound formulas
-            if (!CheckRowHasAudioFormulas(worksheet, row, options))
-            {
-                Console.WriteLine($"Row {row}: Skipping audio creation (no sound formulas)");
-                return;
-            }
+            if (!CheckRowHasAudioFormulas(worksheet, row, options)) return;
 
-            // Lấy sound formulas từ Excel
             var soundFormulas = ExtractAudioFilesFromRow(worksheet, row, options);
 
             foreach (var audioInfo in soundFormulas)
@@ -494,13 +475,41 @@ namespace Text_to_Image.Services
                 string text = GetTextForAudio(worksheet, row, ExtractLanguageFromFileName(audioInfo.FileName), options);
                 if (!string.IsNullOrEmpty(text))
                 {
-                    string outputPath = Path.Combine(options.AudioOutputFolder, audioInfo.FileName);
-                    string googleVoiceName = GetGoogleVoiceNameForLanguage(ExtractLanguageFromFileName(audioInfo.FileName));
-                    var task = CreateAudioFile(text, outputPath, googleVoiceName);
-                    audioTasks.Add(task);
+                    audioInfoList.Add(new AudioCreationInfo
+                    {
+                        FileName = audioInfo.FileName,
+                        Text = text,
+                        OutputPath = Path.Combine(options.AudioOutputFolder, audioInfo.FileName),
+                        VoiceName = audioInfo.VoiceName,
+                        RowNumber = row
+                    });
                 }
             }
         }
+
+        private int ExtractNumberFromFileName(string fileName)
+        {
+            try
+            {
+                // Ví dụ: JP-18-06-2025_03.mp3 -> extract 03
+                var parts = fileName.Split('_');
+                if (parts.Length >= 2)
+                {
+                    var numberPart = parts[1].Split('.')[0];
+                    if (int.TryParse(numberPart, out int number))
+                    {
+                        return number;
+                    }
+                }
+            }
+            catch { }
+            return 0;
+        }
+
+
+
+
+
 
         // THÊM MỚI: Lấy text để tạo audio dựa trên language
         private string GetTextForAudio(ExcelWorksheet worksheet, int row, string language, ProcessingOptions options)
@@ -1017,6 +1026,14 @@ namespace Text_to_Image.Services
             public string SourceColumn { get; set; }
             public string FileName { get; set; }
             public string VoiceName { get; set; }
+        }
+        public class AudioCreationInfo
+        {
+            public string FileName { get; set; }
+            public string Text { get; set; }
+            public string OutputPath { get; set; }
+            public string VoiceName { get; set; }
+            public int RowNumber { get; set; }
         }
     }
 }
