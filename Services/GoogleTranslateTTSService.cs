@@ -62,7 +62,7 @@ namespace Text_to_Image.Services
                         }
 
                         // Delay để tránh rate limiting
-                        await Task.Delay(200);
+                        await Task.Delay(500);
                     }
 
                     if (audioBytes.Count > 0)
@@ -185,28 +185,48 @@ namespace Text_to_Image.Services
                 await ExecuteAudioCreationActions(worksheet, processingResults, options, audioTasks);
 
                 // Execute tất cả audio tasks với semaphore
+                //if (audioTasks.Count > 0)
+                //{
+                //    Console.WriteLine($"Creating {audioTasks.Count} audio files with Google Translate TTS optimized for learners...");
+
+                //    // Tạo âm thanh song song (giới hạn 3 files cùng lúc)
+                //    var tasks = audioTasks.Select(async task =>
+                //    {
+                //        await _semaphore.WaitAsync();
+                //        try
+                //        {
+                //            await task;
+                //        }
+                //        finally
+                //        {
+                //            _semaphore.Release();
+                //        }
+                //    });
+
+                //    await Task.WhenAll(tasks);
+
+                //    Console.WriteLine($"Completed! Created {audioTasks.Count} audio files with Google Translate TTS.");
+                //}
+
+                // Execute tất cả audio tasks TUẦN TỰ (thay vì song song)
                 if (audioTasks.Count > 0)
                 {
-                    Console.WriteLine($"Creating {audioTasks.Count} audio files with Google Translate TTS optimized for learners...");
+                    Console.WriteLine($"Creating {audioTasks.Count} audio files sequentially...");
 
-                    // Tạo âm thanh song song (giới hạn 3 files cùng lúc)
-                    var tasks = audioTasks.Select(async task =>
+                    // SẮP XẾP các tasks theo tên file
+                    var sortedTasks = audioTasks
+                        .Select((task, index) => new { Task = task, Index = index })
+                        .OrderBy(x => x.Index) // Hoặc sắp xếp theo tên file nếu có thể
+                        .Select(x => x.Task)
+                        .ToList();
+
+                    // Execute theo thứ tự đã sắp xếp
+                    foreach (var task in sortedTasks)
                     {
-                        await _semaphore.WaitAsync();
-                        try
-                        {
-                            await task;
-                        }
-                        finally
-                        {
-                            _semaphore.Release();
-                        }
-                    });
-
-                    await Task.WhenAll(tasks);
-
-                    Console.WriteLine($"Completed! Created {audioTasks.Count} audio files with Google Translate TTS.");
+                        await task;
+                    }
                 }
+
                 else
                 {
                     Console.WriteLine("No audio files to create.");

@@ -887,6 +887,7 @@ namespace Text_to_Image.Services
                 for (int i = duplicateRows.Count - 1; i >= 0; i--)
                 {
                     worksheet.DeleteRow(duplicateRows[i]);
+                    Console.WriteLine($"Duplicate Row: {duplicateRows[i]}");
                 }
 
                 if (duplicateRows.Count > 0)
