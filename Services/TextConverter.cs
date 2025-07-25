@@ -63,7 +63,7 @@ namespace JapaneseConverter
                 if (KanjiHelper.IsKanji(c))
                 {
                     // Convert kanji to image tag with SVG
-                    result.Append($"<img src=\"{c}.svg\">");
+                    result.Append($"<img src=\"{c}.svg\"><img src=\"{c}.gif\">");
                 }
                 // Existing conversion logic for hiragana and katakana
                 else if (JapanMapping.HiraganaDakuonMap.ContainsKey(c))
